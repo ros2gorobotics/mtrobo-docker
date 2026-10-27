@@ -1,2 +1,5 @@
 maps/
 .env
+ros2ready/
+docker-compose.override.yml
+mtrobo_manager.py
