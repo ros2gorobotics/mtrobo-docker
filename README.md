@@ -57,9 +57,7 @@ cd D:\
 git clone https://github.com/ros2gorobotics/mtrobo-docker.git
 cd mtrobo-docker
 mkdir maps
-git clone https://github.com/jamorn1976/ros2ready.git
 ```
-`ros2ready` คือหน้าเว็บ MTRobo ต้องอยู่ในโฟลเดอร์ `mtrobo-docker`
 
 **แบบที่ 2: ไม่ใช้ Git**
 
@@ -67,8 +65,7 @@ git clone https://github.com/jamorn1976/ros2ready.git
 2. กด **Code → Download ZIP**
 3. แตกไฟล์ไว้ที่ `D:\mtrobo-docker`
 4. สร้างโฟลเดอร์ชื่อ `maps` ข้างใน
-5. เข้า https://github.com/jamorn1976/ros2ready กด **Code → Download ZIP** แตกไฟล์ไว้ใน `D:\mtrobo-docker` แล้วเปลี่ยนชื่อโฟลเดอร์ `ros2ready-main` เป็น `ros2ready`
-6. เปิด PowerShell แล้วรัน `cd D:\mtrobo-docker`
+5. เปิด PowerShell แล้วรัน `cd D:\mtrobo-docker`
 
 > จะเก็บไว้ที่ไดรฟ์หรือโฟลเดอร์ไหนก็ได้ ตัวอย่างนี้ใช้ `D:\`
 
@@ -135,7 +132,7 @@ ROS_DOMAIN_ID=0
 ```powershell
 docker compose up -d
 ```
-ครั้งแรกจะดาวน์โหลด image ประมาณ 1–2 GB ใช้เวลาหลายนาที เมื่อเสร็จจะขึ้น `Container mtrobo Started` และ `Container mtrobo_web Started`
+ครั้งแรกจะดาวน์โหลด image ประมาณ 1–2 GB และ build หน้าเว็บจาก GitHub (ประมาณ 3–5 นาที ทำครั้งเดียว) เมื่อเสร็จจะขึ้น `Container mtrobo Started` และ `Container mtrobo_web Started`
 
 เปิดหุ่น (หรือกดรีเซ็ต ESP32) แล้วดู log:
 ```powershell
@@ -156,7 +153,7 @@ docker compose logs -f
 
 ## ขั้นที่ 8: เชื่อมหน้าเว็บ MTRobo
 
-หน้าเว็บรันอยู่ใน container `mtrobo_web` ครั้งแรกต้อง build หลายนาที ดูความคืบหน้าด้วย `docker compose logs -f web` รอจนขึ้น `Ready`
+หน้าเว็บรันอยู่ใน container `mtrobo_web` เปิดพร้อมกับ `docker compose up -d`
 
 เปิดหน้าเว็บที่:
 
@@ -193,7 +190,7 @@ exit                       # ออกจาก container
 | ดู log | `docker compose logs -f` |
 | ดู log เฉพาะ lidar | `docker compose logs --tail 200 \| Select-String "udp_lidar"` |
 | เข้า shell | `docker exec -it mtrobo bash` |
-| **อัปเดตเป็นเวอร์ชันล่าสุด** | `git pull` และ `git -C ros2ready pull` แล้วรัน `docker compose pull` ตามด้วย `docker compose up -d --force-recreate` |
+| **อัปเดตเป็นเวอร์ชันล่าสุด** | `git pull` แล้วรัน `docker compose pull --ignore-buildable`, `docker compose build --no-cache web` ตามด้วย `docker compose up -d --force-recreate` |
 
 หลังติดตั้งครั้งแรกเสร็จ MTRobo จะเริ่มทำงานเองทุกครั้งที่เปิดเครื่อง หากไม่ต้องการให้เริ่มเอง ให้สั่ง `docker compose down`
 
@@ -210,8 +207,8 @@ exit                       # ออกจาก container
 | log ขึ้น `No LiDAR data from ESP32` | ข้อมูล lidar มาไม่ถึง | firewall 9999, หุ่นเปิดอยู่ไหม, แบตเตอรี่, Wi-Fi |
 | log ขึ้น `Ignored UDP packet of ... bytes` | firmware lidar เป็นคนละเวอร์ชันกับตัวรับ | อัปเดต firmware ของ ESP32 |
 | หน้าเว็บเชื่อมต่อไม่ได้ | firewall หรือ IP ไม่ถูกต้อง | เปิด firewall TCP 9090 ถ้าเปิดหน้าเว็บจากเครื่องอื่นให้ใช้ IP ของเครื่อง Windows ไม่ใช่ `localhost` |
-| มือถือเปิด `:3000` ไม่ได้ | หน้าเว็บยัง build ไม่เสร็จ หรือ firewall | ดู `docker compose logs web` ต้องขึ้น `Ready` และเปิด firewall TCP 3000 ถ้ารัน `npm run dev` อยู่ให้ปิดก่อน เพราะชนพอร์ต 3000 |
-| `mtrobo_web` รีสตาร์ทไม่หยุด, log ขึ้น `Could not read package.json` | ยังไม่ได้ดาวน์โหลด `ros2ready` | ทำขั้นที่ 3 ให้มีโฟลเดอร์ `ros2ready` แล้วรัน `docker compose up -d` |
+| มือถือเปิด `:3000` ไม่ได้ | container หน้าเว็บไม่ทำงาน หรือ firewall | `docker compose ps` ต้องเห็น `mtrobo_web` เป็น `Up` และเปิด firewall TCP 3000 ถ้ารัน `npm run dev` อยู่ให้ปิดก่อน เพราะชนพอร์ต 3000 |
+| `docker compose up` ขึ้น error ตอน build `web` | เครื่องต่อ GitHub ไม่ได้ | ตรวจอินเทอร์เน็ต แล้วรัน `docker compose up -d` ใหม่ |
 | `docker: command not found` หรือ `cannot connect to the Docker daemon` | Docker Desktop ยังไม่เปิด | เปิด Docker Desktop แล้วรอจนขึ้น **Engine running** |
 | RViz ไม่เปิดหน้าต่าง | WSLg ยังไม่พร้อม | รัน `wsl --update` ใน PowerShell แบบ admin แล้วรีสตาร์ทเครื่อง |
 
