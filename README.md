@@ -57,7 +57,12 @@ cd D:\
 git clone https://github.com/ros2gorobotics/mtrobo-docker.git
 cd mtrobo-docker
 mkdir maps
+git clone https://github.com/jamorn1976/ros2ready.git
 ```
+
+`ros2ready` คือหน้าเว็บ MTRobo ต้องอยู่ในโฟลเดอร์ `mtrobo-docker` ข้างไฟล์ `docker-compose.yml`
+
+> ⚠️ repo `ros2ready` เป็น private ต้องล็อกอิน GitHub ด้วยบัญชีที่มีสิทธิ์อ่าน repo นี้ git จะใช้ credential ที่เครื่องจำไว้ ถ้ายังไม่เคยล็อกอิน git จะเปิดหน้าต่างให้ล็อกอินตอน `git clone`
 
 **แบบที่ 2: ไม่ใช้ Git**
 
@@ -65,9 +70,10 @@ mkdir maps
 2. กด **Code → Download ZIP**
 3. แตกไฟล์ไว้ที่ `D:\mtrobo-docker`
 4. สร้างโฟลเดอร์ชื่อ `maps` ข้างใน
-5. เปิด PowerShell แล้วรัน `cd D:\mtrobo-docker`
+5. ล็อกอิน GitHub ด้วยบัญชีที่มีสิทธิ์อ่าน แล้วเข้า https://github.com/jamorn1976/ros2ready กด **Code → Download ZIP** แตกไฟล์ไว้ใน `D:\mtrobo-docker` แล้วเปลี่ยนชื่อโฟลเดอร์ `ros2ready-main` เป็น **`ros2ready`**
+6. เปิด PowerShell แล้วรัน `cd D:\mtrobo-docker`
 
-> จะเก็บไว้ที่ไดรฟ์หรือโฟลเดอร์ไหนก็ได้ ตัวอย่างนี้ใช้ `D:\`
+> จะเก็บไว้ที่ไดรฟ์หรือโฟลเดอร์ไหนก็ได้ ตัวอย่างนี้ใช้ `D:\` (ใน WSL โฟลเดอร์เดียวกันคือ `/mnt/d/mtrobo-docker`)
 
 ---
 
@@ -78,18 +84,16 @@ mkdir maps
 > Start → พิมพ์ `powershell` → **คลิกขวา → Run as administrator** (แถบชื่อหน้าต่างต้องมีคำว่า *Administrator*)
 
 ```powershell
-New-NetFirewallRule -DisplayName "MTRobo micro-ROS" -Direction Inbound -Protocol UDP -LocalPort 8888 -Action Allow
-New-NetFirewallRule -DisplayName "MTRobo UDP lidar" -Direction Inbound -Protocol UDP -LocalPort 9999 -Action Allow
-New-NetFirewallRule -DisplayName "MTRobo rosbridge" -Direction Inbound -Protocol TCP -LocalPort 9090 -Action Allow
-New-NetFirewallRule -DisplayName "MTRobo web UI" -Direction Inbound -Protocol TCP -LocalPort 3000 -Action Allow
+New-NetFirewallRule -DisplayName "MTRobo TCP" -Direction Inbound -Protocol TCP -LocalPort 3000,9090 -Action Allow -Profile Private,Domain
+New-NetFirewallRule -DisplayName "MTRobo UDP" -Direction Inbound -Protocol UDP -LocalPort 8888,9999 -Action Allow -Profile Private,Domain
 ```
 
-ตรวจสอบ ต้องเห็นกฎ MTRobo 4 รายการ และช่อง Enabled เป็น `True`:
+ตรวจสอบ ต้องเห็นกฎ MTRobo 2 รายการ และช่อง Enabled เป็น `True`:
 ```powershell
 Get-NetFirewallRule -DisplayName "MTRobo*" | Format-Table DisplayName, Enabled, Profile
 ```
 
-ถ้า Wi-Fi ถูกตั้งเป็น **Public network** ให้เปลี่ยนเป็น **Private**:
+**Wi-Fi ต้องเป็นเครือข่ายแบบ Private** (กฎด้านบนเปิดเฉพาะ Private / Domain) ถ้าเป็น **Public network** ให้เปลี่ยน:
 Settings → Network & internet → Wi-Fi → คลิกชื่อ Wi-Fi → **Network profile type → Private**
 
 | Port | ใช้ทำอะไร |
@@ -128,11 +132,11 @@ ROS_DOMAIN_ID=0
 
 ## ขั้นที่ 7: เริ่มใช้งาน
 
-ใน PowerShell ที่โฟลเดอร์ `mtrobo-docker`:
+ใน PowerShell ที่โฟลเดอร์ `mtrobo-docker` (ต้องมีโฟลเดอร์ `ros2ready` จากขั้นที่ 3 แล้ว):
 ```powershell
-docker compose up -d
+docker compose up -d --build
 ```
-ครั้งแรกจะดาวน์โหลด image ประมาณ 1–2 GB และ build หน้าเว็บจาก GitHub (ประมาณ 3–5 นาที ทำครั้งเดียว) เมื่อเสร็จจะขึ้น `Container mtrobo Started` และ `Container mtrobo_web Started`
+ครั้งแรกจะดาวน์โหลด image ประมาณ 1–2 GB และ build หน้าเว็บจากโฟลเดอร์ `ros2ready` (ประมาณ 3–5 นาที ทำครั้งเดียว) เมื่อเสร็จจะขึ้น `Container mtrobo Started` และ `Container mtrobo_web Started` ครั้งต่อไปใช้ `docker compose up -d` ได้เลย
 
 เปิดหุ่น (หรือกดรีเซ็ต ESP32) แล้วดู log:
 ```powershell
@@ -158,9 +162,37 @@ docker compose logs -f
 เปิดหน้าเว็บที่:
 
 - `http://localhost:3000` บนเครื่อง Windows เครื่องเดียวกัน
-- `http://<IP เครื่อง Windows>:3000` จากมือถือหรือเครื่องอื่นที่ต่อ Wi-Fi วงเดียวกัน (ห้ามใช้ `localhost` บนมือถือ) มือถือจะเข้าหน้า `/go` สำหรับเลือกจุดหมาย
+- `http://<IP Wi-Fi ของ Windows>:3000` จากมือถือหรือเครื่องอื่นที่ต่อ Wi-Fi วงเดียวกัน (ห้ามใช้ `localhost` บนมือถือ) มือถือจะถูกพาไปหน้า `/go` สำหรับเลือกจุดหมายเอง
 
-หน้าเว็บต่อ rosbridge ที่ `ws://<IP เดียวกัน>:9090` ให้เอง จากนั้นสั่งสร้างแผนที่และนำทางจากหน้าเว็บได้เลย แผนที่ที่บันทึกจะอยู่ในโฟลเดอร์ **`maps`**
+หน้าเว็บต่อ rosbridge ที่ `ws://<IP เดียวกัน>:9090` ให้อัตโนมัติ จากนั้นสั่งสร้างแผนที่และนำทางจากหน้าเว็บได้เลย แผนที่ที่บันทึกจะอยู่ในโฟลเดอร์ **`maps`**
+
+> ถ้าเคยตั้ง URL rosbridge เองไว้ในหน้าเว็บ (ปุ่ม ⚙) ค่านั้นจะถูกจำไว้ในเบราว์เซอร์ ถ้า IP ของ Windows เปลี่ยน ต้องแก้ URL ในหน้าเว็บด้วย
+
+**อัปเดตหน้าเว็บ:**
+```powershell
+cd ros2ready; git pull; cd ..
+docker compose up -d --build web
+```
+
+---
+
+## ปรับตัวกรอง lidar (ไม่บังคับ)
+
+bringup ตัดจุด lidar ที่ใกล้กว่า **12 cm** ทิ้ง (เสาและชิ้นส่วนของตัวหุ่นที่บัง lidar) ข้อมูลดิบอยู่ที่ `/scan_raw` ส่วนข้อมูลที่กรองแล้วอยู่ที่ `/scan` ถ้าหุ่นของคุณมีเสาไกลกว่านี้ ให้สร้างไฟล์ `maps\laser_range_filter.yaml` แล้วแก้ `lower_threshold` (หน่วยเมตร):
+```yaml
+scan_to_scan_filter_chain:
+  ros__parameters:
+    filter1:
+      name: range_filter
+      type: laser_filters/LaserScanRangeFilter
+      params:
+        use_message_range_limits: false
+        lower_threshold: 0.12
+        upper_threshold: 12.0
+        lower_replacement_value: -.inf
+        upper_replacement_value: .inf
+```
+จากนั้นรัน `docker compose restart mtrobo` ไม่ควรตั้งเกินขนาดตัวหุ่น เพราะสิ่งกีดขวางจริงที่อยู่ใกล้หุ่นจะหายไปด้วย
 
 ---
 
@@ -190,7 +222,7 @@ exit                       # ออกจาก container
 | ดู log | `docker compose logs -f` |
 | ดู log เฉพาะ lidar | `docker compose logs --tail 200 \| Select-String "udp_lidar"` |
 | เข้า shell | `docker exec -it mtrobo bash` |
-| **อัปเดตเป็นเวอร์ชันล่าสุด** | `git pull` แล้วรัน `docker compose pull --ignore-buildable`, `docker compose build --no-cache web` ตามด้วย `docker compose up -d --force-recreate` |
+| **อัปเดตเป็นเวอร์ชันล่าสุด** | `git pull` และ `cd ros2ready; git pull; cd ..` แล้วรัน `docker compose pull --ignore-buildable` ตามด้วย `docker compose up -d --build --force-recreate` |
 
 หลังติดตั้งครั้งแรกเสร็จ MTRobo จะเริ่มทำงานเองทุกครั้งที่เปิดเครื่อง หากไม่ต้องการให้เริ่มเอง ให้สั่ง `docker compose down`
 
@@ -207,8 +239,11 @@ exit                       # ออกจาก container
 | log ขึ้น `No LiDAR data from ESP32` | ข้อมูล lidar มาไม่ถึง | firewall 9999, หุ่นเปิดอยู่ไหม, แบตเตอรี่, Wi-Fi |
 | log ขึ้น `Ignored UDP packet of ... bytes` | firmware lidar เป็นคนละเวอร์ชันกับตัวรับ | อัปเดต firmware ของ ESP32 |
 | หน้าเว็บเชื่อมต่อไม่ได้ | firewall หรือ IP ไม่ถูกต้อง | เปิด firewall TCP 9090 ถ้าเปิดหน้าเว็บจากเครื่องอื่นให้ใช้ IP ของเครื่อง Windows ไม่ใช่ `localhost` |
-| มือถือเปิด `:3000` ไม่ได้ | container หน้าเว็บไม่ทำงาน หรือ firewall | `docker compose ps` ต้องเห็น `mtrobo_web` เป็น `Up` และเปิด firewall TCP 3000 ถ้ารัน `npm run dev` อยู่ให้ปิดก่อน เพราะชนพอร์ต 3000 |
-| `docker compose up` ขึ้น error ตอน build `web` | เครื่องต่อ GitHub ไม่ได้ | ตรวจอินเทอร์เน็ต แล้วรัน `docker compose up -d` ใหม่ |
+| มือถือเปิด `:3000` ไม่ได้ | container หน้าเว็บไม่ทำงาน, firewall หรือ Wi-Fi เป็น Public | `docker compose ps` ต้องเห็น `mtrobo_web` เป็น `Up`, เปิด firewall (ขั้นที่ 4) และตั้ง Wi-Fi เป็น Private ถ้ารัน `npm run dev` อยู่ให้ปิดก่อน เพราะชนพอร์ต 3000 |
+| มือถือเปิด `http://<IP>:3000` ไม่ได้ แต่บนเครื่อง Windows เปิด `localhost:3000` ได้ | ติดตั้ง Docker ซ้ำใน WSL Ubuntu (`docker.io` / `docker-ce`) ทำให้ `docker-proxy` ใน WSL เปิดพอร์ตไว้แค่ `127.0.0.1` | ใช้ Docker Desktop ชุดเดียว ปิด Docker ใน WSL ด้วย `sudo systemctl disable --now docker docker.socket containerd` แล้วรัน `docker compose up -d` ใหม่ |
+| `docker compose up` ขึ้น `unable to prepare context: path "...ros2ready" not found` | ยังไม่ได้ดาวน์โหลด `ros2ready` | ทำขั้นที่ 3 ให้มีโฟลเดอร์ `ros2ready` ข้าง `docker-compose.yml` แล้วรัน `docker compose up -d --build` |
+| `git clone` ros2ready ขึ้น `Repository not found` หรือขอ Username | บัญชี GitHub ไม่มีสิทธิ์อ่าน repo | ล็อกอิน GitHub ด้วยบัญชีที่ได้รับสิทธิ์ แล้ว clone ใหม่ |
+| build หน้าเว็บขึ้น `SIGBUS` / `Bus error` | รัน `npm run build` ในโฟลเดอร์ที่ mount มาจาก `/mnt/d` | ใช้ `docker compose up -d --build web` ซึ่ง build ใน Dockerfile ไม่เจอปัญหานี้ ไม่ต้อง mount โฟลเดอร์ `ros2ready` เข้า container |
 | `docker: command not found` หรือ `cannot connect to the Docker daemon` | Docker Desktop ยังไม่เปิด | เปิด Docker Desktop แล้วรอจนขึ้น **Engine running** |
 | RViz ไม่เปิดหน้าต่าง | WSLg ยังไม่พร้อม | รัน `wsl --update` ใน PowerShell แบบ admin แล้วรีสตาร์ทเครื่อง |
 

@@ -32,9 +32,10 @@ services:
     restart: unless-stopped
 
   # หน้าเว็บ ros2ready (มือถือเปิด http://<IP เครื่อง Windows>:3000)
-  # build จาก GitHub ครั้งแรกครั้งเดียว อัปเดตด้วย: docker compose build --no-cache web
+  # ต้อง clone ไว้ข้างไฟล์นี้ก่อน: git clone https://github.com/jamorn1976/ros2ready.git
+  # อัปเดต: cd ros2ready && git pull && cd .. && docker compose up -d --build web
   web:
-    build: https://github.com/jamorn1976/ros2ready.git#main
+    build: ./ros2ready
     image: mtrobo-web:latest
     container_name: mtrobo_web
     ports:
