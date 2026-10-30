@@ -1,0 +1,8 @@
+# ใช้ host networking แทนการ map port (UDP 8888 / 9999, TCP 9090)
+# ตัวส่งต่อพอร์ต UDP ของ Docker Desktop บน Windows ทำให้แพ็กเก็ตหายเป็นช่วงได้
+# ต้องเปิดก่อน: Docker Desktop -> Settings -> Resources -> Network -> Enable host networking
+#   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d
+services:
+  mtrobo:
+    network_mode: host
+    ports: !reset []
