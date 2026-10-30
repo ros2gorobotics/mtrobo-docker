@@ -176,27 +176,6 @@ docker compose up -d --build web
 
 ---
 
-## หุ่นกระตุก / agent ต่อใหม่บ่อย: ใช้ host networking (ไม่บังคับ)
-
-ตัวส่งต่อพอร์ต UDP ของ Docker Desktop บน Windows ทำให้แพ็กเก็ตหายเป็นช่วงได้ อาการคือแผงสถานะหุ่นขึ้น "เชื่อม agent" หลายครั้ง และ Nav2 ล้มกลางทางพร้อมข้อความ `Latest source and current collision monitor node timestamps differ` ให้ลองใช้ host networking:
-
-1. Docker Desktop → **Settings → Resources → Network** → ติ๊ก ✅ **Enable host networking** → **Apply & restart**
-2. เริ่มด้วยไฟล์ host networking เพิ่ม:
-   ```powershell
-   docker compose down
-   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d
-   ```
-3. ตรวจ: ESP32 ต้องขึ้น `session established` ใน log และหน้าเว็บต้องต่อ `ws://<IP Windows>:9090` ได้
-
-ถ้าใช้ไม่ได้ ให้กลับไปแบบเดิมด้วย `docker compose down` แล้ว `docker compose up -d`
-
-นับครั้งที่ agent ต่อใหม่ใน 5 นาที (ควรเป็น 0–1):
-```powershell
-docker compose logs --since 5m mtrobo 2>&1 | Select-String -SimpleMatch "session established" | Measure-Object | Select-Object Count
-```
-
----
-
 ## ปรับตัวกรอง lidar (ไม่บังคับ)
 
 bringup ตัดจุด lidar ที่ใกล้กว่า **12 cm** ทิ้ง (เสาและชิ้นส่วนของตัวหุ่นที่บัง lidar) ข้อมูลดิบอยู่ที่ `/scan_raw` ส่วนข้อมูลที่กรองแล้วอยู่ที่ `/scan` ถ้าหุ่นของคุณมีเสาไกลกว่านี้ ให้สร้างไฟล์ `maps\laser_range_filter.yaml` แล้วแก้ `lower_threshold` (หน่วยเมตร):
