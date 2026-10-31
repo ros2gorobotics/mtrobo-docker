@@ -178,21 +178,23 @@ docker compose up -d --build web
 
 ## ปรับตัวกรอง lidar (ไม่บังคับ)
 
-bringup ตัดจุด lidar ที่ใกล้กว่า **12 cm** ทิ้ง (เสาและชิ้นส่วนของตัวหุ่นที่บัง lidar) ข้อมูลดิบอยู่ที่ `/scan_raw` ส่วนข้อมูลที่กรองแล้วอยู่ที่ `/scan` ถ้าหุ่นของคุณมีเสาไกลกว่านี้ ให้สร้างไฟล์ `maps\laser_range_filter.yaml` แล้วแก้ `lower_threshold` (หน่วยเมตร):
+bringup ตัดแสงสะท้อนจากเสาด้านหลัง lidar ด้วย laser_filters เฉพาะฝั่งหลัง x -12..0 cm และ y ±15 cm จาก lidar ด้านหน้าและด้านข้างไม่ถูกตัด ข้อมูลดิบอยู่ที่ `/scan_raw` ส่วนข้อมูลที่กรองแล้วอยู่ที่ `/scan` ทั้งสอง topic เป็น best effort ถ้าหุ่นของคุณต่างออกไป ให้สร้างไฟล์ `maps\laser_range_filter.yaml` แล้วแก้ค่า (หน่วยเมตร):
 ```yaml
 scan_to_scan_filter_chain:
   ros__parameters:
     filter1:
-      name: range_filter
-      type: laser_filters/LaserScanRangeFilter
+      name: rear_box
+      type: laser_filters/LaserScanBoxFilter
       params:
-        use_message_range_limits: false
-        lower_threshold: 0.12
-        upper_threshold: 12.0
-        lower_replacement_value: -.inf
-        upper_replacement_value: .inf
+        box_frame: laser_frame
+        min_x: -0.12
+        max_x: 0.0
+        min_y: -0.15
+        max_y: 0.15
+        min_z: -0.1
+        max_z: 0.1
 ```
-จากนั้นรัน `docker compose restart mtrobo` ไม่ควรตั้งเกินขนาดตัวหุ่น เพราะสิ่งกีดขวางจริงที่อยู่ใกล้หุ่นจะหายไปด้วย
+จากนั้นรัน `docker compose restart mtrobo` ไม่ควรตั้งกล่องกว้างเกินตัวหุ่น เพราะสิ่งกีดขวางจริงจะหายไปด้วย
 
 ---
 
