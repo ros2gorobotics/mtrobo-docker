@@ -44,8 +44,10 @@ PUBLISH = {
 }
 CAN_CANCEL = {"blocks", "goal", "drive"}
 # read-only services every role may call (topic list, map, parameter reads, a goal's result)
-READ_SERVICES = re.compile(r"^/rosapi/|^/map_server/map$|/(get_parameters|list_parameters|describe_parameters|get_parameter_types)$|/_action/get_result$")
+# rosapi is read-only except set_param / delete_param, which would let any group change any node's parameters
+READ_SERVICES = re.compile(r"^/rosapi/(?!set_param$|delete_param$)|^/map_server/map$|/(get_parameters|list_parameters|describe_parameters|get_parameter_types)$|/_action/get_result$")
 ZERO_UUID = [0] * 16
+PIN_DELAY = 1.0      # s per wrong teacher PIN, for the whole hub: 4 digits take hours to guess, not milliseconds
 
 
 def now() -> float:
@@ -169,6 +171,7 @@ class Hub:
         self.proxies: set[Proxy] = set()
         self._push_due = False
         self._last_state = ""
+        self._pin_lock = asyncio.Lock()
 
     # ---------- helpers ----------
     def robot(self, n) -> Robot | None:
@@ -369,8 +372,10 @@ class Hub:
                 await self.tell(g, out)
             return
         if op == "teacher":
-            if str(m.get("pin", "")) != self.pin:
+            if not secrets.compare_digest(str(m.get("pin", "")).encode(), self.pin.encode()):
                 log.warning("wrong teacher PIN from %s", ws.peer)
+                async with self._pin_lock:          # wrong PINs queue up hub-wide; the right PIN never waits
+                    await asyncio.sleep(PIN_DELAY)
                 return await self.reply(ws, {"op": "error", "reason": "pin"})
             self.teachers.add(ws)
             await self.reply(ws, {"op": "class", "state": self.state()})
@@ -615,6 +620,8 @@ def main() -> None:
     pin = os.environ.get("HUB_PIN", "1234")
     if pin == "1234":
         log.warning("HUB_PIN not set: the teacher PIN is 1234")
+    elif len(pin) < 6:
+        log.warning("HUB_PIN is shorter than 6 digits: easier to guess")
     hub = Hub(pin, robots_from_env(os.environ.get("HUB_ROBOTS", "ws://mtrobo:9090")), os.environ.get("CLASS_JOIN_URL", ""),
               float(os.environ.get("HUB_MAX_V", "0.25")), float(os.environ.get("HUB_MAX_W", "1.0")))
     asyncio.run(hub.run(port=int(os.environ.get("HUB_PORT", "9000"))))
