@@ -27,6 +27,7 @@ services:
       CLASS_JOIN_URL: ${CLASS_JOIN_URL:-}             # เช่น http://192.168.1.105:3000/join (IP เครื่องครู)
       HUB_MAX_V: ${HUB_MAX_V:-0.25}                   # ความเร็วสูงสุดของนักเรียน m/s
       HUB_MAX_W: ${HUB_MAX_W:-1.0}                    # หมุนเร็วสุด rad/s
+      HUB_SIM: ${HUB_SIM:-0}                          # > 0 = ห้องเรียนจำลองข้ามเครื่อง ไม่มีหุ่น (จำนวนหุ่นจำลองสูงสุด)
     depends_on:
       - mtrobo
     restart: unless-stopped

@@ -230,6 +230,47 @@ async def main() -> None:
     ok(T.last("class")["state"] is None and A.last("expired") and B2.last("expired"), "close")
 
     server.close()
+
+    # ---------- HUB_SIM: no robots, every page simulates its own (contract v1.2) ----------
+    sh = Hub("2468", [], sim=3)
+    ss = await serve(sh.route, "127.0.0.1", 0)
+    SH = f"ws://127.0.0.1:{ss.sockets[0].getsockname()[1]}/class"
+    T = Client(await connect(SH))
+    await T.send({"op": "teacher", "pin": "2468"})
+    await settle(0.2)
+    ok(T.last("class").get("sim") is True, "sim: teacher not told the hub simulates")
+    await T.send({"op": "open", "robots": 2})
+    await settle()
+    st = T.last("class")["state"]
+    ok(len(st["robots"]) == 2 and all(r["online"] for r in st["robots"]) and st.get("venue") == "", f"sim robots {st['robots']}")
+    await T.send({"op": "venue", "venue": "cafe"})
+    A = Client(await connect(SH))
+    await A.send({"op": "join", "code": st["code"], "group": "แมว"})
+    await settle()
+    ok(A.last("waiting").get("sim") is True, "sim: waiting without sim")
+    ga = T.last("class")["state"]["groups"][0]["id"]
+    ok(T.last("class")["state"]["groups"][0]["venue"] == "cafe", "sim: group did not get the lesson venue")
+    await T.send({"op": "assign", "group": ga, "robot": 2, "role": "drive"})
+    await settle()
+    g = A.last("granted")
+    ok(g and g.get("sim") is True and g["venue"] == "cafe" and g["robot"]["n"] == 2, f"sim: granted {g}")
+    await T.send({"op": "venue", "group": ga, "venue": "hotel"})
+    await settle()
+    ok(A.last("granted")["venue"] == "hotel", "sim: group venue change not sent")
+    P = Client(await connect(SH.replace("/class", f"/robot/2?token={A.last('granted')['token']}")))
+    await settle()
+    ok(P.closed() and "simulated" in str(P.got), "sim: robot connection not refused")
+    await T.send({"op": "demo_start", "by": "teacher", "robot": 1})
+    B = Client(await connect(SH))
+    await B.send({"op": "join", "code": st["code"], "group": "หมา"})
+    await settle()
+    d = B.last("demo")
+    ok(d and d["on"] and d.get("sim") is True and d["venue"] == "cafe", f"sim: demo on {d}")
+    await T.send({"op": "stop_all", "on": True})
+    await settle()
+    ok(A.last("stop_all")["on"] is True, "sim: stop all not told")
+    ss.close()
+
     print("FAILED" if fails else "OK hub", f"({len(fails)} failures)")
     sys.exit(1 if fails else 0)
 

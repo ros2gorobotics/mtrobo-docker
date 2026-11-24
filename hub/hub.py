@@ -15,6 +15,9 @@ Config (environment):
   HUB_MAX_V        class speed cap, m/s (forwarded cmd_vel)    default 0.25
   HUB_MAX_W        class turn cap, rad/s                       default 1.0
   HUB_PORT         default 9000
+  HUB_SIM          N > 0: no real robots. A class of up to N simulated robots (the teacher picks how many when opening);
+                   every student page drives its own simulator in the venue the teacher picks, joined through this hub
+                   from any device on the Wi-Fi. HUB_ROBOTS is ignored. (contract v1.2)
 """
 import asyncio
 import json
@@ -72,8 +75,15 @@ class Robot:
     def info(self) -> dict:
         return {"n": self.n, "name": self.name, "color": self.color}
 
+    @property
+    def sim(self) -> bool:
+        return not self.url
+
     def card(self) -> dict:
         t = now()
+        if self.sim:   # simulated in each student's browser: nothing to measure here
+            return {**self.info(), "online": True, "battery": None, "rssi": None, "agent": None,
+                    "navigating": False, "group": self.group, "stopped": self.stopped}
         return {**self.info(), "online": self.link is not None and t - self.seen_t < 5,
                 "battery": self.battery, "rssi": self.rssi,
                 "agent": (t - self.status_t < 3) if self.status_t else None,
@@ -119,7 +129,7 @@ class Robot:
     async def stop(self) -> None:
         """zero velocity (3 times, as the web does on release) and cancel every Nav2 goal"""
         ws = self.link
-        if not ws:
+        if not ws or self.sim:
             return
         try:
             if not self.advertised:
@@ -141,11 +151,12 @@ class Group:
         self.id, self.name, self.token = gid, name, token
         self.robot: int | None = None
         self.role = "watch"
+        self.venue = ""
         self.conn: WS | None = None
         self.seen = now()
 
     def card(self) -> dict:
-        return {"id": self.id, "name": self.name, "robot": self.robot, "role": self.role, "online": now() - self.seen < 7, "venue": ""}
+        return {"id": self.id, "name": self.name, "robot": self.robot, "role": self.role, "online": now() - self.seen < 7, "venue": self.venue}
 
 
 class Proxy:
@@ -157,8 +168,10 @@ class Proxy:
 
 
 class Hub:
-    def __init__(self, pin: str, robots: list[Robot], join: str = "", max_v: float = 0.25, max_w: float = 1.0):
+    def __init__(self, pin: str, robots: list[Robot], join: str = "", max_v: float = 0.25, max_w: float = 1.0, sim: int = 0):
         self.pin, self.robots, self.join, self.max_v, self.max_w = pin, robots, join, max_v, max_w
+        self.sim = max(0, min(10, sim))     # > 0: simulated robots only (HUB_SIM)
+        self.venue = ""                     # simulated classes: the lesson's venue
         self.code: str | None = None
         self.stop_all = False
         self.groups: dict[str, Group] = {}
@@ -185,6 +198,8 @@ class Hub:
             return None
         s = {"code": self.code, "stopAll": self.stop_all, "robots": [r.card() for r in self.robots],
              "groups": [g.card() for g in self.groups.values()], "demo": self.demo}
+        if self.sim:
+            s["venue"] = self.venue
         if self.join:
             s["join"] = self.join
         return s
@@ -194,7 +209,7 @@ class Hub:
 
     async def push(self, force: bool = False) -> None:
         """the class state to every teacher page (on change, and once a second for battery / online)"""
-        s = json.dumps({"op": "class", "state": self.state()}, ensure_ascii=False)
+        s = json.dumps({"op": "class", "state": self.state(), **({"sim": True} if self.sim else {})}, ensure_ascii=False)
         if not force and s == self._last_state:
             return
         self._last_state = s
@@ -220,8 +235,11 @@ class Hub:
     def status(self, g: Group) -> dict:
         r = self.robot(g.robot)
         if r:
-            return {"op": "granted", "group": g.name, "token": g.token, "robot": r.info(), "role": g.role, "venue": ""}
-        return {"op": "waiting", "group": g.name, "token": g.token}
+            return {"op": "granted", "group": g.name, "token": g.token, "robot": r.info(), "role": g.role, "venue": g.venue, **self.simf()}
+        return {"op": "waiting", "group": g.name, "token": g.token, **self.simf()}
+
+    def simf(self) -> dict:
+        return {"sim": True} if self.sim else {}
 
     async def free(self, g: Group) -> None:
         """take the group off its robot: the robot stops and its goal is cancelled"""
@@ -241,7 +259,9 @@ class Hub:
     def demo_on(self) -> dict:
         D = self.demo
         r = self.robot(D["robot"])
-        return {"op": "demo", "on": True, "by": D["name"], "robot": r.info() if r else None, "venue": "", "view": dict(self.dview)}
+        p = self.groups.get(D["by"])
+        venue = (p.venue if p else self.venue) if self.sim else ""
+        return {"op": "demo", "on": True, "by": D["name"], "robot": r.info() if r else None, "venue": venue, "view": dict(self.dview), **self.simf()}
 
     async def end_demo(self) -> None:
         D = self.demo
@@ -309,7 +329,8 @@ class Hub:
             g = Group(gid, name, f"{gid}.{secrets.token_urlsafe(12)}")
             g.conn = ws
             self.groups[gid] = g
-            await self.reply(ws, {"op": "waiting", "group": name, "token": g.token})
+            g.venue = self.venue
+            await self.reply(ws, {"op": "waiting", "group": name, "token": g.token, **self.simf()})
             if self.demo and self.demo["to"] is None:
                 await self.reply(ws, self.demo_on())
             log.info("group %s joined", name)
@@ -324,7 +345,7 @@ class Hub:
                     return await self.reply(ws, {"op": "pong"})
                 r = self.robot(D["robot"])
                 if r:
-                    await self.reply(ws, {"op": "granted", "group": "ครู", "token": token, "robot": r.info(), "role": "drive", "venue": ""})
+                    await self.reply(ws, {"op": "granted", "group": "ครู", "token": token, "robot": r.info(), "role": "drive", "venue": self.venue, **self.simf()})
                 return await self.reply(ws, {"op": "present", "on": True})
             g = self.by_token(token)
             if not g:
@@ -378,7 +399,7 @@ class Hub:
                     await asyncio.sleep(PIN_DELAY)
                 return await self.reply(ws, {"op": "error", "reason": "pin"})
             self.teachers.add(ws)
-            await self.reply(ws, {"op": "class", "state": self.state()})
+            await self.reply(ws, {"op": "class", "state": self.state(), **self.simf()})
             return
         # ---------- teacher commands ----------
         if ws not in self.teachers:
@@ -390,6 +411,10 @@ class Hub:
         op = m.get("op")
         if op == "open":
             await self.close_class()
+            if self.sim:   # the teacher picks how many simulated robots (up to HUB_SIM)
+                k = m.get("robots") if isinstance(m.get("robots"), int) else self.sim
+                self.robots = [Robot(i + 1, f"หุ่น {i + 1} {COLOR_NAMES[i % 10]}", COLORS[i % 10], "") for i in range(max(1, min(self.sim, k)))]
+                self.venue = ""
             self.code = f"{random.randint(1000, 9999)}"
             log.info("lesson open, code %s", self.code)
             return
@@ -451,6 +476,19 @@ class Hub:
             if r:
                 await r.stop()
                 await self.tell(self.groups.get(r.group or ""), {"op": "halt"})
+        elif op == "venue":
+            # simulated classes: the lesson's venue (every group) or one group's; a group on a robot reopens its page there
+            if not self.sim:
+                return
+            v = str(m.get("venue", ""))[:40]
+            targets = [g] if g else list(self.groups.values())
+            if not g:
+                self.venue = v
+            for x in targets:
+                if x.venue != v:
+                    x.venue = v
+                    if x.robot is not None:
+                        await self.tell(x, self.status(x))
         elif op == "demo_start":
             by = str(m.get("by", ""))
             to = [x for x in (m.get("to") or []) if x in self.groups] or None
@@ -494,6 +532,9 @@ class Hub:
     async def robot_conn(self, ws: WS, n: int) -> None:
         token = ws.query.get("token", "")
         r = self.robot(n)
+        if r and r.sim:
+            await ws.send(json.dumps({"op": "status", "level": "error", "msg": f"robot {n} is simulated in the browser"}))
+            return
         if not r or self.rights(token, n) is None:
             await ws.send(json.dumps({"op": "status", "level": "error", "msg": "denied: not your robot"}))
             return
@@ -597,9 +638,10 @@ class Hub:
     async def run(self, host: str = "0.0.0.0", port: int = 9000) -> None:
         server = await serve(self.route, host, port)
         for r in self.robots:
-            asyncio.create_task(r.run(self.changed))
+            if not r.sim:
+                asyncio.create_task(r.run(self.changed))
         asyncio.create_task(self.ticker())
-        log.info("classroom hub on ws://%s:%d (%d robots)", host, port, len(self.robots))
+        log.info("classroom hub on ws://%s:%d (%s)", host, port, f"simulated robots, up to {self.sim}" if self.sim else f"{len(self.robots)} robots")
         async with server:
             await server.serve_forever()
 
@@ -622,8 +664,10 @@ def main() -> None:
         log.warning("HUB_PIN not set: the teacher PIN is 1234")
     elif len(pin) < 6:
         log.warning("HUB_PIN is shorter than 6 digits: easier to guess")
-    hub = Hub(pin, robots_from_env(os.environ.get("HUB_ROBOTS", "ws://mtrobo:9090")), os.environ.get("CLASS_JOIN_URL", ""),
-              float(os.environ.get("HUB_MAX_V", "0.25")), float(os.environ.get("HUB_MAX_W", "1.0")))
+    sim = int(os.environ.get("HUB_SIM", "0") or 0)
+    robots = [] if sim > 0 else robots_from_env(os.environ.get("HUB_ROBOTS", "ws://mtrobo:9090"))
+    hub = Hub(pin, robots, os.environ.get("CLASS_JOIN_URL", ""),
+              float(os.environ.get("HUB_MAX_V", "0.25")), float(os.environ.get("HUB_MAX_W", "1.0")), sim)
     asyncio.run(hub.run(port=int(os.environ.get("HUB_PORT", "9000"))))
 
 
