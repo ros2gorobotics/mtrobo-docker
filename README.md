@@ -250,3 +250,38 @@ exit                       # ออกจาก container
 | RViz ไม่เปิดหน้าต่าง | WSLg ยังไม่พร้อม | รัน `wsl --update` ใน PowerShell แบบ admin แล้วรีสตาร์ทเครื่อง |
 
 ถ้ายังแก้ไม่ได้ ให้แนบผลของ `docker compose logs --tail 200` มาเมื่อขอความช่วยเหลือ
+
+---
+
+## ห้องเรียน: ครูหนึ่งเครื่อง นักเรียนต่อจากแท็บเล็ต / มือถือ (ทดลอง, issue #1)
+
+ฮับห้องเรียน (`hub/`, พอร์ต 9000) อยู่ระหว่างหน้าเว็บกับหุ่น: ตรวจรหัสห้อง ให้แต่ละกลุ่มสั่งได้ตามสิทธิ์ที่ครูให้
+จำกัดความเร็ว หยุดทุกตัว และโหมดครูสาธิต ในโหมดนี้ rosbridge (9090) **ไม่เปิดออก Wi-Fi** นักเรียนต่อหุ่นตรงไม่ได้
+
+1. ดาวน์โหลดหน้าเว็บห้องเรียนไว้ข้าง `docker-compose.yml` (ครั้งเดียว):
+   ```powershell
+   git clone https://github.com/jamorn1976/mtrobo.git
+   ```
+2. สร้างไฟล์ `.env` ข้าง `docker-compose.yml`:
+   ```
+   HUB_PIN=ตั้ง PIN ครูเป็นตัวเลข
+   CLASS_JOIN_URL=http://<IP เครื่องนี้>:3000/join
+   ```
+   IP เครื่องนี้ดูได้จาก `ipconfig` (IPv4 Address ของ Wi-Fi) ควรตั้งให้คงที่ที่ router
+3. เปิดพอร์ต 9000 ใน firewall (PowerShell แบบ admin, ครั้งเดียว):
+   ```powershell
+   New-NetFirewallRule -DisplayName "MTRobo hub" -Direction Inbound -Protocol TCP -LocalPort 9000 -Action Allow -Profile Private,Domain
+   ```
+4. รัน:
+   ```powershell
+   docker compose -f docker-compose.yml -f docker-compose.classroom.yml up -d --build
+   ```
+5. ครูเปิด **http://localhost:3000/class** บนเครื่องนี้ → เลือก **หุ่นจริง** → ใส่ PIN → **เปิดคาบเรียน**
+   นักเรียนสแกน QR บนหน้าครู (Wi-Fi วงเดียวกัน)
+
+กลับไปใช้แบบเดิม (หุ่นตัวเดียว ไม่มีห้องเรียน): `docker compose -f docker-compose.yml -f docker-compose.classroom.yml down` แล้ว `docker compose up -d`
+
+ข้อจำกัดตอนนี้: หุ่นหนึ่งตัวต่อเครื่อง (หลายตัวต้องแยก ROS_DOMAIN_ID และพอร์ต agent / lidar ของแต่ละตัว ยังไม่ได้ทำ),
+ยังไม่มี `/robot_info` (ชื่อ / สีหุ่นตั้งใน `HUB_ROBOTS`), Wi-Fi บางที่กันอุปกรณ์คุยกัน (client isolation) ต้องปิดที่ router
+
+ทดสอบฮับโดยไม่ใช้หุ่น: `cd hub && python3 test_hub.py`

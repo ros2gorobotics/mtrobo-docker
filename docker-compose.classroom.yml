@@ -1,0 +1,32 @@
+# ห้องเรียน MTRobo (issue #1) ใช้ร่วมกับ docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.classroom.yml up -d --build
+# ต้องมีโฟลเดอร์ mtrobo (git clone https://github.com/jamorn1976/mtrobo.git) ข้างไฟล์นี้
+# ต้องใช้ Docker Compose 2.24.4 ขึ้นไป (Docker Desktop รุ่นปัจจุบันมีแล้ว) เพราะใช้ !override
+services:
+  mtrobo:
+    # rosbridge (9090) ไม่เปิดออก Wi-Fi ของห้อง: นักเรียนต้องผ่านฮับเท่านั้น ฮับต่อ rosbridge ผ่าน docker network
+    ports: !override
+      - "8888:8888/udp"   # micro-ROS agent (ESP32 -> PC)
+      - "9999:9999/udp"   # UDP lidar
+
+  # หน้าเว็บห้องเรียน: mtrobo (ไม่ใช่ ros2ready) ครูเปิด http://localhost:3000/class นักเรียนสแกน QR บนหน้าครู
+  web:
+    build: !override
+      context: ./mtrobo
+    image: mtrobo-class-web:latest
+
+  hub:
+    build: ./hub
+    image: mtrobo-hub:latest
+    container_name: mtrobo_hub
+    ports:
+      - "9000:9000"
+    environment:
+      HUB_PIN: ${HUB_PIN:-1234}                       # PIN ครู: ตั้งใน .env
+      HUB_ROBOTS: ${HUB_ROBOTS:-ws://mtrobo:9090}     # หุ่นทีละตัว คั่นด้วย , (ชื่อ|#สี|url ก็ได้)
+      CLASS_JOIN_URL: ${CLASS_JOIN_URL:-}             # เช่น http://192.168.1.105:3000/join (IP เครื่องครู)
+      HUB_MAX_V: ${HUB_MAX_V:-0.25}                   # ความเร็วสูงสุดของนักเรียน m/s
+      HUB_MAX_W: ${HUB_MAX_W:-1.0}                    # หมุนเร็วสุด rad/s
+    depends_on:
+      - mtrobo
+    restart: unless-stopped
