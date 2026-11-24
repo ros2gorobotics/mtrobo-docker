@@ -285,3 +285,15 @@ exit                       # ออกจาก container
 ยังไม่มี `/robot_info` (ชื่อ / สีหุ่นตั้งใน `HUB_ROBOTS`), Wi-Fi บางที่กันอุปกรณ์คุยกัน (client isolation) ต้องปิดที่ router
 
 ทดสอบฮับโดยไม่ใช้หุ่น: `cd hub && python3 test_hub.py`
+
+### หุ่นแมวจำลองในห้องเรียน (ไม่ต้องมีหุ่นจริง)
+
+เพิ่มไฟล์ `docker-compose.sim.yml` ต่อท้าย จะได้หุ่นแมวจำลอง 3 ตัวผ่านฮับห้องเรียน PC / มือถือนักเรียนเข้าห้องข้ามเครื่องได้เหมือนหุ่นจริง:
+```bash
+docker compose -f docker-compose.yml -f docker-compose.classroom.yml -f docker-compose.sim.yml up -d --build
+```
+- ครูเปิด http://localhost:3000/class → เลือก **หุ่นจริง** (หุ่นจำลองต่อผ่านฮับเหมือนหุ่นจริง) → PIN → เปิดคาบเรียน
+- หุ่นแต่ละตัวอยู่ในห้องจำลองของตัวเอง 8 × 6 m (โต๊ะ เสา ผนังมีประตู) ขับ / สร้างแผนที่ / บันทึกแผนที่ / นำทาง / หยุดทุกตัว ได้
+- หุ่นจำลองใช้ URDF เดียวกับหุ่นแมวจริง (`MTROBO_BASE=2wd`) หยุดเองเมื่อไม่มี cmd_vel เกิน 500 ms เหมือน firmware ชนผนังแล้วหยุด
+- ใส่หุ่นจริงด้วย: ตั้ง `HUB_ROBOTS` ใน `.env` เช่น `HUB_ROBOTS=หุ่นจริง|ws://mtrobo:9090,จำลอง 1|ws://sim1:9090`
+- แผนที่ของหุ่นจำลองเก็บใน docker volume `sim1_maps` … `sim3_maps`

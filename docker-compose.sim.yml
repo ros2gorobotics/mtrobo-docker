@@ -1,0 +1,39 @@
+# หุ่นแมวจำลองสำหรับห้องเรียน (ไม่ต้องมีหุ่นจริง) ใช้ร่วมกับไฟล์ห้องเรียน:
+#   docker compose -f docker-compose.yml -f docker-compose.classroom.yml -f docker-compose.sim.yml up -d --build
+# หุ่นจำลอง 3 ตัว แต่ละตัวอยู่ในห้องจำลองของตัวเอง (8 x 6 m มีโต๊ะ เสา ประตู) แยก ROS_DOMAIN_ID จึงไม่ปนกัน
+# สร้างแผนที่ / นำทาง / หยุดทุกตัว ได้เหมือนหุ่นจริง ผ่านฮับห้องเรียนพอร์ต 9000
+# ใส่หุ่นจริงด้วย: ตั้ง HUB_ROBOTS ใน .env เช่น
+#   HUB_ROBOTS=หุ่นจริง|ws://mtrobo:9090,จำลอง 1|ws://sim1:9090,จำลอง 2|ws://sim2:9090
+x-sim: &sim
+  image: ghcr.io/ros2gorobotics/mtrobo-docker:jazzy
+  command: ["ros2", "launch", "/sim/sim_robot.launch.py"]
+  volumes:
+    - ./sim:/sim:ro
+  restart: unless-stopped
+
+services:
+  sim1:
+    <<: *sim
+    container_name: mtrobo_sim1
+    environment: {MTROBO_BASE: 2wd, ROS_DOMAIN_ID: "21", SIM_POSE: "1.0,1.0,0.0"}
+    volumes: [./sim:/sim:ro, sim1_maps:/home/ros/maps]
+  sim2:
+    <<: *sim
+    container_name: mtrobo_sim2
+    environment: {MTROBO_BASE: 2wd, ROS_DOMAIN_ID: "22", SIM_POSE: "1.0,3.0,0.0"}
+    volumes: [./sim:/sim:ro, sim2_maps:/home/ros/maps]
+  sim3:
+    <<: *sim
+    container_name: mtrobo_sim3
+    environment: {MTROBO_BASE: 2wd, ROS_DOMAIN_ID: "23", SIM_POSE: "1.0,5.0,0.0"}
+    volumes: [./sim:/sim:ro, sim3_maps:/home/ros/maps]
+
+  hub:
+    environment:
+      HUB_ROBOTS: ${HUB_ROBOTS:-หุ่นแมวจำลอง 1|#f59f00|ws://sim1:9090,หุ่นแมวจำลอง 2|#1c7ed6|ws://sim2:9090,หุ่นแมวจำลอง 3|#e03131|ws://sim3:9090}
+    depends_on: [sim1, sim2, sim3]
+
+volumes:
+  sim1_maps:
+  sim2_maps:
+  sim3_maps:
