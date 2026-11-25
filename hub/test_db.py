@@ -174,6 +174,37 @@ def main() -> int:
             ok(g["students"] == [{"no": 3, "nick": "ภูมิใจ", "last4": "4567"}, {"no": 7, "nick": "ต้นข้าว", "last4": "6781"}],
                f"group card students wrong: {g}")
             ok("id" not in str(g["students"]), "student db ids leak to the teacher page")
+            # part 3: usage written by the hub (assign = a robot run, stop, close ends everything)
+            gid = [v for v in hub.groups.values()][0].id
+            await ws.send(json.dumps({"op": "assign", "group": gid, "robot": 1, "role": "drive"}))
+            await asyncio.sleep(0.2)
+            await ws.send(json.dumps({"op": "stop", "robot": 1}))
+            await ws.send(json.dumps({"op": "assign", "group": gid, "robot": 1, "role": "blocks"}))
+            await asyncio.sleep(0.2)
+            await ws.send(json.dumps({"op": "close"}))
+            await asyncio.sleep(0.3)
+            c = d.con
+            sess = c.execute("SELECT * FROM class_sessions").fetchall()
+            ok(len(sess) == 1 and sess[0]["classroom_id"] == cid and sess[0]["teacher_id"] == d.user_by_pin("802461")["id"]
+               and sess[0]["ended_at"] >= sess[0]["started_at"], f"class session wrong: {[dict(x) for x in sess]}")
+            att = c.execute("SELECT student_id, left_at FROM attendance").fetchall()
+            ok(len(att) == 2 and all(x["left_at"] for x in att), f"attendance wrong: {[dict(x) for x in att]}")
+            runs = c.execute("SELECT mode, role, teacher_stops, ended_at FROM robot_runs ORDER BY started_at").fetchall()
+            ok([(r["mode"], r["role"], r["teacher_stops"]) for r in runs] == [("sim", "drive", 1), ("sim", "blocks", 0)]
+               and all(r["ended_at"] for r in runs), f"robot runs wrong: {[dict(x) for x in runs]}")
+            ok(c.execute("SELECT COUNT(*) FROM group_members").fetchone()[0] == 2, "group members not written")
+            ev = [r[0] for r in c.execute("SELECT type FROM events ORDER BY ts")]
+            ok({"join", "assign", "close"} <= set(ev), f"events wrong: {ev}")
+            # 45 minutes long: counts as teaching hours and students reached for 2/2569
+            c.execute("UPDATE class_sessions SET started_at = '2026-11-25T02:00:00Z', ended_at = '2026-11-25T02:45:00Z'")
+            c.execute("UPDATE robot_runs SET started_at = '2026-11-25T02:05:00Z', ended_at = '2026-11-25T02:35:00Z'")
+            u = d.usage_summary()
+            ok(u == [{"year": 2569, "term": 2, "hours": 0.8, "hours_real": 0.0, "sessions": 1, "students_year": 2}], f"usage summary wrong: {u}")
+            # a power cut: an open lesson is closed at its last minute on the next start
+            sid2 = d.session_open(cid, None, "1111")
+            d.run_start(sid2, None, "real", 1, "drive")
+            ok(d.close_dangling() == 1 and c.execute("SELECT COUNT(*) FROM robot_runs WHERE ended_at IS NULL").fetchone()[0] == 0,
+               "dangling lesson not closed")
             await s1.close(); await s2.close()
             await ws.close()
             task.cancel()
