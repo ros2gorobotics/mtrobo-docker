@@ -317,5 +317,6 @@ docker compose -f docker-compose.yml -f docker-compose.classroom.yml exec hub py
 - **เมื่อมีผู้ใช้ในฐานข้อมูลแล้ว ครูแต่ละคนเข้าหน้าครูด้วย PIN ของตัวเอง และ `HUB_PIN` ใช้ไม่ได้อีก** ก่อนตั้งค่ายังใช้ `HUB_PIN` ตามเดิม
 - คำสั่งอื่น: `users` (รายชื่อ), `set-pin <ชื่อ>`, `disable <ชื่อ>`, `enable <ชื่อ>`, `add-training <ชื่อ> --course ... --passed YYYY-MM-DD --teach-alone`, `info`, `backup` ดูทั้งหมดด้วย `python db.py --help`
 - คัดลอกไฟล์สำรองออกจากเครื่อง (เช่น ใส่ USB): `docker cp mtrobo_hub:/data/backup .`
+- ชั่วโมงสอนและจำนวนนักเรียนต่อภาคเรียน: `... exec hub python db.py usage` (บันทึกอัตโนมัติทุกคาบ นับเฉพาะคาบที่เปิดด้วยรายชื่อนักเรียน ยาว 20 นาทีขึ้นไป และมีกลุ่มได้ใช้หุ่นจริงหรือหุ่นจำลอง)
 
 ทดสอบ: `cd hub && python3 test_db.py`

@@ -15,6 +15,7 @@ PINs are asked for without echo when --pin is not given (a PIN on the command li
 import argparse
 import csv
 import io
+import json
 import datetime as dt
 import getpass
 import hashlib
@@ -277,6 +278,77 @@ class DB:
                              "WHERE e.classroom_id = ? AND s.code_hash = ? AND s.archived_at IS NULL", (cid, self.code_hash(code))).fetchone()
         return {"id": r["id"], "no": r["number"], "nick": r["nickname"] or "", "last4": r["code_last4"]} if r else None
 
+    # ---------- part 3: usage, written by the hub only (teachers never type hours) ----------
+    def session_open(self, classroom_id: str | None, teacher_id: str | None, code: str) -> str:
+        sid, t = new_id(), utcnow()
+        # ended_at moves forward while the lesson is open (session_touch), so a PC switched off mid-lesson still counts
+        self.con.execute("INSERT INTO class_sessions (id, classroom_id, teacher_id, class_code, started_at, ended_at) VALUES (?,?,?,?,?,?)",
+                         (sid, classroom_id, teacher_id, code, t, t))
+        return sid
+
+    def session_touch(self, sid: str) -> None:
+        self.con.execute("UPDATE class_sessions SET ended_at = ? WHERE id = ?", (utcnow(), sid))
+
+    def session_close(self, sid: str) -> None:
+        t = utcnow()
+        self.con.execute("UPDATE robot_runs SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL", (t, sid))
+        self.con.execute("UPDATE attendance SET left_at = ? WHERE session_id = ? AND left_at IS NULL", (t, sid))
+        self.con.execute("UPDATE class_sessions SET ended_at = ? WHERE id = ?", (t, sid))
+
+    def close_dangling(self) -> int:
+        """lessons left open by a crash or power cut: end them at their last touch"""
+        rows = self.con.execute("SELECT id, ended_at FROM class_sessions WHERE id IN "
+                                "(SELECT session_id FROM robot_runs WHERE ended_at IS NULL UNION "
+                                " SELECT session_id FROM attendance WHERE left_at IS NULL)").fetchall()
+        for r in rows:
+            self.con.execute("UPDATE robot_runs SET ended_at = ? WHERE session_id = ? AND ended_at IS NULL", (r["ended_at"], r["id"]))
+            self.con.execute("UPDATE attendance SET left_at = ? WHERE session_id = ? AND left_at IS NULL", (r["ended_at"], r["id"]))
+        return len(rows)
+
+    def group_add(self, sid: str, name: str, student_ids: list[str]) -> str:
+        gid, t = new_id(), utcnow()
+        self.con.execute("INSERT INTO groups (id, session_id, name) VALUES (?,?,?)", (gid, sid, name))
+        for st in student_ids:
+            self.con.execute("INSERT OR IGNORE INTO group_members (group_id, student_id) VALUES (?,?)", (gid, st))
+            self.con.execute("INSERT OR IGNORE INTO attendance (session_id, student_id, joined_at) VALUES (?,?,?)", (sid, st, t))
+            self.con.execute("UPDATE attendance SET left_at = NULL WHERE session_id = ? AND student_id = ?", (sid, st))
+        return gid
+
+    def group_left(self, sid: str, student_ids: list[str]) -> None:
+        t = utcnow()
+        for st in student_ids:
+            self.con.execute("UPDATE attendance SET left_at = ? WHERE session_id = ? AND student_id = ? AND left_at IS NULL", (t, sid, st))
+
+    def run_start(self, sid: str, group_id: str | None, mode: str, n: int | None, role: str, venue: str = "") -> str:
+        rid = new_id()
+        robot = None
+        if mode == "real" and n is not None:
+            r = self.con.execute("SELECT id FROM robots WHERE n = ?", (n,)).fetchone()
+            robot = r["id"] if r else None
+        self.con.execute("INSERT INTO robot_runs (id, session_id, group_id, mode, robot_id, role, venue, started_at) VALUES (?,?,?,?,?,?,?,?)",
+                         (rid, sid, group_id, mode, robot, role, venue or None, utcnow()))
+        return rid
+
+    def run_end(self, rid: str, teacher_stops: int = 0) -> None:
+        self.con.execute("UPDATE robot_runs SET ended_at = ?, teacher_stops = teacher_stops + ? WHERE id = ? AND ended_at IS NULL",
+                         (utcnow(), teacher_stops, rid))
+
+    def run_count(self, rid: str, field: str, k: int = 1) -> None:
+        if field not in ("goals_sent", "goals_reached", "teacher_stops", "errors"):
+            raise ValueError(field)
+        self.con.execute(f"UPDATE robot_runs SET {field} = {field} + ? WHERE id = ?", (k, rid))
+
+    def event(self, sid: str | None, actor: str, type_: str, payload: dict | None = None) -> None:
+        self.con.execute("INSERT INTO events (id, session_id, ts, actor, type, payload) VALUES (?,?,?,?,?,?)",
+                         (new_id(), sid, utcnow(), actor, type_, json.dumps(payload, ensure_ascii=False) if payload else None))
+
+    def usage_summary(self) -> list[dict]:
+        """per school year and term: teaching hours (all / with a real robot), sessions, students reached"""
+        hours = {(r["academic_year"], r["term"]): dict(r) for r in self.con.execute("SELECT * FROM v_teaching_hours_term")}
+        reach = {r["academic_year"]: r["students"] for r in self.con.execute("SELECT * FROM v_students_reached")}
+        return [{"year": y, "term": t, "hours": h["hours_total"], "hours_real": h["hours_with_real_robot"],
+                 "sessions": h["sessions"], "students_year": reach.get(y, 0)} for (y, t), h in sorted(hours.items())]
+
     # ---------- robots, licences, trainings ----------
     def add_robot(self, n: int, name: str = "", color: str = "", serial: str = "", firmware: str = "") -> str:
         rid = new_id()
@@ -365,6 +437,7 @@ def cli(argv: list[str] | None = None) -> int:
     s.add_argument("--level", default=""); s.add_argument("--passed", default="", help="YYYY-MM-DD")
     s.add_argument("--teach-alone", action="store_true")
     s = sub.add_parser("info", help="สรุปโรงเรียน หุ่น license")
+    s = sub.add_parser("usage", help="ชั่วโมงสอนและจำนวนนักเรียนต่อภาคเรียน")
     s = sub.add_parser("backup", help="สำรองข้อมูลตอนนี้"); s.add_argument("--to", default=None)
     a = p.parse_args(argv)
     db = DB(a.db)
@@ -397,6 +470,13 @@ def cli(argv: list[str] | None = None) -> int:
             for l in db.licenses():
                 print(f"license {l['package']} หุ่น {l['robot_count']} ตัว {l['starts_on']} ถึง {l['ends_on']}")
             print(f"สำรองล่าสุด: {db.setting('last_backup') or '-'}")
+        elif a.cmd == "usage":
+            rows = db.usage_summary()
+            if not rows:
+                print("ยังไม่มีคาบที่นับเป็นชั่วโมงสอน (คาบที่ใช้รายชื่อ ยาว 20 นาทีขึ้นไป และมีการใช้หุ่น)")
+            for r in rows:
+                print(f"{r['term']}/{r['year']}: สอน {r['hours']} ชม. ({r['sessions']} คาบ, หุ่นจริง {r['hours_real']} ชม.) · "
+                      f"นักเรียนทั้งปี {r['students_year']} คน")
         elif a.cmd == "backup":
             print(f"สำรองแล้ว: {db.backup(a.to)}")
     except (ValueError, sqlite3.IntegrityError) as e:

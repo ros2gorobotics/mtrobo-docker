@@ -166,6 +166,8 @@ class Group:
         self.conn: WS | None = None
         self.seen = now()
         self.students: list[dict] = []    # class with a roster (contract v1.4): {id, no, nick, last4}
+        self.dbid: str | None = None      # its row in the database (usage, part 3)
+        self.run: str | None = None       # the open robot_runs row while it has a robot
 
     def card(self) -> dict:
         c = {"id": self.id, "name": self.name, "robot": self.robot, "role": self.role, "online": now() - self.seen < 7, "venue": self.venue}
@@ -192,6 +194,8 @@ class Hub:
         self.venue = ""                     # simulated classes: the lesson's venue
         self.code: str | None = None
         self.roster: dict | None = None   # the lesson's classroom {id, label}: students join with their IDs (v1.4)
+        self.sess: str | None = None      # the lesson's class_sessions row (usage, database part 3)
+        self.actor: str | None = None     # the signed-in user giving the current teacher command
         self._miss_lock = asyncio.Lock()  # student IDs not found: one at a time, slowly (no guessing)
         self.stop_all = False
         self.groups: dict[str, Group] = {}
@@ -267,8 +271,24 @@ class Hub:
     def simf(self) -> dict:
         return {"sim": True} if self.sim else {}
 
+    def rec(self, fn: str, *args):
+        """write usage to the database; never lets a database problem reach the class"""
+        if self.db is None:
+            return None
+        try:
+            return getattr(self.db, fn)(*args)
+        except Exception as e:
+            log.error("database %s: %s", fn, e)
+            return None
+
+    def end_run(self, g: Group) -> None:
+        if g.run:
+            self.rec("run_end", g.run)
+            g.run = None
+
     async def free(self, g: Group) -> None:
         """take the group off its robot: the robot stops and its goal is cancelled"""
+        self.end_run(g)
         r = self.robot(g.robot)
         if r:
             r.group = None
@@ -377,6 +397,9 @@ class Hub:
             g.conn = ws
             g.students = members
             self.groups[gid] = g
+            if self.sess:
+                g.dbid = self.rec("group_add", self.sess, name, [x["id"] for x in members])
+                self.rec("event", self.sess, gid, "join", {"group": name, "students": len(members)})
             g.venue = self.venue
             await self.reply(ws, {"op": "waiting", "group": name, "token": g.token, **self.simf()})
             if self.hint:
@@ -436,6 +459,9 @@ class Hub:
                 if self.demo and self.demo["by"] == g.id:
                     await self.end_demo()
                 await self.free(g)
+                if self.sess:
+                    self.rec("group_left", self.sess, [x["id"] for x in g.students])
+                    self.rec("event", self.sess, g.id, "leave", None)
                 del self.groups[g.id]
                 await self.prune()
                 self.changed()
@@ -474,6 +500,7 @@ class Hub:
             return await self.reply(ws, {"op": "error", "reason": "pin"})
         if op in ("rosters", "roster_import"):
             return await self.roster_op(ws, m)
+        self.actor = self.teacher_user.get(ws)
         await self.teacher(m)
         self.changed()
 
@@ -551,6 +578,7 @@ class Hub:
                     info = None
                 if info:
                     self.roster = {"id": info["id"], "label": info["label"]}
+            self.sess = self.rec("session_open", self.roster["id"] if self.roster else None, self.actor, self.code)
             log.info("lesson open, code %s%s", self.code, f", roster {self.roster['label']}" if self.roster else "")
             return
         if op == "close":
@@ -573,7 +601,11 @@ class Hub:
                 await self.tell(old, self.status(old))
             if g.robot is not None and g.robot != r.n:
                 await self.free(g)
+            self.end_run(g)   # a new role on the same robot is a new run
             g.robot, g.role, r.group = r.n, role, g.id
+            if self.sess:
+                g.run = self.rec("run_start", self.sess, g.dbid, "sim" if self.sim else "real", r.n, role, g.venue if self.sim else "")
+                self.rec("event", self.sess, "teacher", "assign", {"group": g.id, "robot": r.n, "role": role})
             await self.tell(g, self.status(g))
             await self.prune()
         elif op == "unassign":
@@ -593,6 +625,9 @@ class Hub:
             if self.demo and self.demo["to"]:
                 self.demo["to"] = [x for x in self.demo["to"] if x != g.id]
             await self.free(g)
+            if self.sess:
+                self.rec("group_left", self.sess, [x["id"] for x in g.students])
+                self.rec("event", self.sess, "teacher", "remove", {"group": g.id})
             await self.tell(g, {"op": "revoked", "reason": "removed"})
             await self.tell(g, {"op": "expired"})
             del self.groups[g.id]
@@ -605,12 +640,21 @@ class Hub:
                 await asyncio.gather(*(r.stop() for r in self.robots))
             for x in self.groups.values():
                 await self.tell(x, {"op": "stop_all", "on": self.stop_all})
+            if self.sess:
+                self.rec("event", self.sess, "teacher", "stop_all", {"on": self.stop_all})
+                if self.stop_all:
+                    for x in self.groups.values():
+                        if x.run:
+                            self.rec("run_count", x.run, "teacher_stops")
             log.info("stop all %s", "ON" if self.stop_all else "off")
         elif op == "stop":
             r = self.robot(m.get("robot"))
             if r:
                 await r.stop()
-                await self.tell(self.groups.get(r.group or ""), {"op": "halt"})
+                x = self.groups.get(r.group or "")
+                if x and x.run:
+                    self.rec("run_count", x.run, "teacher_stops")
+                await self.tell(x, {"op": "halt"})
         elif op == "venue":
             # simulated classes: the lesson's venue (every group) or one group's; a group on a robot reopens its page there
             if not self.sim:
@@ -647,6 +691,8 @@ class Hub:
             for x in self.viewers():
                 await self.tell(x, on)
             await self.prune()
+            if self.sess:
+                self.rec("event", self.sess, "teacher", "demo_start", {"by": by, "robot": robot, "to": None if to is None else len(to)})
             log.info("demo by %s on robot %s to %s", name, robot, "all" if to is None else len(to))
         elif op == "demo_end":
             await self.end_demo()
@@ -658,6 +704,10 @@ class Hub:
             await self.tell(g, {"op": "revoked", "reason": "closed"})
             await self.tell(g, {"op": "expired"})
         self.groups.clear()
+        if self.sess:
+            self.rec("event", self.sess, "teacher", "close", None)
+            self.rec("session_close", self.sess)
+            self.sess = None
         self.code, self.stop_all, self.roster = None, False, None
         for r in self.robots:
             r.stopped = False
@@ -771,6 +821,8 @@ class Hub:
             await asyncio.sleep(1)
             await self.push()
             n += 1
+            if self.sess and n % 60 == 0:      # the lesson's end moves forward each minute (power cut = last minute)
+                self.rec("session_touch", self.sess)
             if self.db is not None and n % 3600 == 10:      # 10 s after start, then hourly: one copy per day
                 try:
                     out = self.db.backup_if_due()
@@ -815,6 +867,9 @@ def main() -> None:
     if path and DB is not None:
         try:
             db = DB(path)
+            k = db.close_dangling()
+            if k:
+                log.info("database: %d lesson(s) left open last time closed at their last minute", k)
             log.info("database %s (%s)", path, "teachers' own PINs" if db.has_users() else "no users yet: HUB_PIN, run db.py setup")
         except Exception as e:
             log.error("database %s not opened, class runs without it: %s", path, e)
