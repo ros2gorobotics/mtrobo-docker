@@ -71,6 +71,9 @@ class Robot:
         self.group: str | None = None
         self.link: WS | None = None
         self.advertised = False
+        # simulated robot (HUB_SIM): Wi-Fi in the good band, -42 … -54 dBm (owner 2026-11-25: a simulated robot's Wi-Fi is
+        # good unless "จำลองสัญญาณ Wi-Fi ของหุ่น" is on, and that setting lives in the student's browser, not here)
+        self.sim_rssi = -42 - random.randint(0, 12)
 
     def info(self) -> dict:
         return {"n": self.n, "name": self.name, "color": self.color}
@@ -82,7 +85,7 @@ class Robot:
     def card(self) -> dict:
         t = now()
         if self.sim:   # simulated in each student's browser: nothing to measure here
-            return {**self.info(), "online": True, "battery": None, "rssi": None, "agent": None,
+            return {**self.info(), "online": True, "battery": None, "rssi": self.sim_rssi, "agent": None,
                     "navigating": False, "group": self.group, "stopped": self.stopped}
         return {**self.info(), "online": self.link is not None and t - self.seen_t < 5,
                 "battery": self.battery, "rssi": self.rssi,

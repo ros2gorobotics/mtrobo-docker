@@ -243,6 +243,7 @@ async def main() -> None:
     await settle()
     st = T.last("class")["state"]
     ok(len(st["robots"]) == 2 and all(r["online"] for r in st["robots"]) and st.get("venue") == "", f"sim robots {st['robots']}")
+    ok(all(-54 <= r["rssi"] <= -42 for r in st["robots"]), f"sim Wi-Fi not in the good band: {[r['rssi'] for r in st['robots']]}")
     await T.send({"op": "venue", "venue": "cafe"})
     A = Client(await connect(SH))
     await A.send({"op": "join", "code": st["code"], "group": "แมว"})
