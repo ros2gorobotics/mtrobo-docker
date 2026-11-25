@@ -57,6 +57,7 @@ CAN_CANCEL = {"blocks", "goal", "drive"}
 # rosapi is read-only except set_param / delete_param, which would let any group change any node's parameters
 READ_SERVICES = re.compile(r"^/rosapi/(?!set_param$|delete_param$)|^/map_server/map$|/(get_parameters|list_parameters|describe_parameters|get_parameter_types)$|/_action/get_result$")
 ZERO_UUID = [0] * 16
+MISS_DELAY = 0.5     # s per student ID not found, for the whole hub
 PIN_DELAY = 1.0      # s per wrong teacher PIN, for the whole hub: 4 digits take hours to guess, not milliseconds
 
 
@@ -164,9 +165,13 @@ class Group:
         self.venue = ""
         self.conn: WS | None = None
         self.seen = now()
+        self.students: list[dict] = []    # class with a roster (contract v1.4): {id, no, nick, last4}
 
     def card(self) -> dict:
-        return {"id": self.id, "name": self.name, "robot": self.robot, "role": self.role, "online": now() - self.seen < 7, "venue": self.venue}
+        c = {"id": self.id, "name": self.name, "robot": self.robot, "role": self.role, "online": now() - self.seen < 7, "venue": self.venue}
+        if self.students:
+            c["students"] = [{"no": s["no"], "nick": s["nick"], "last4": s["last4"]} for s in self.students]
+        return c
 
 
 class Proxy:
@@ -186,6 +191,8 @@ class Hub:
         self.sim = max(0, min(10, sim))     # > 0: simulated robots only (HUB_SIM)
         self.venue = ""                     # simulated classes: the lesson's venue
         self.code: str | None = None
+        self.roster: dict | None = None   # the lesson's classroom {id, label}: students join with their IDs (v1.4)
+        self._miss_lock = asyncio.Lock()  # student IDs not found: one at a time, slowly (no guessing)
         self.stop_all = False
         self.groups: dict[str, Group] = {}
         self.teachers: set[WS] = set()
@@ -219,6 +226,8 @@ class Hub:
             s["hint"] = self.hint
         if self.join:
             s["join"] = self.join
+        if self.roster:
+            s["roster"] = self.roster
         return s
 
     def changed(self) -> None:
@@ -341,10 +350,32 @@ class Hub:
                 return await self.reply(ws, {"op": "error", "reason": "name"})
             if any(g.name == name and now() - g.seen < 7 for g in self.groups.values()):
                 return await self.reply(ws, {"op": "error", "reason": "taken"})
+            members: list[dict] = []
+            if self.roster:      # v1.4: every member's student ID must be in the lesson's roster, in no other group
+                ids = m.get("students") if isinstance(m.get("students"), list) else []
+                ids = [str(x) for x in ids][:7]
+                if not 1 <= len(ids) <= 6:
+                    return await self.reply(ws, {"op": "error", "reason": "students"})
+                bad, taken = [], []
+                inuse = {s["id"] for g in self.groups.values() for s in g.students}
+                for i, code in enumerate(ids):
+                    st = self.find_student(code)
+                    if not st:
+                        bad.append(i)
+                    elif st["id"] in inuse or any(x["id"] == st["id"] for x in members):
+                        taken.append(i)
+                    else:
+                        members.append(st)
+                if bad:
+                    await self.slow_miss()
+                    return await self.reply(ws, {"op": "error", "reason": "student", "bad": bad})
+                if taken:
+                    return await self.reply(ws, {"op": "error", "reason": "student_taken", "bad": taken})
             gid = f"g{self.next}"
             self.next += 1
             g = Group(gid, name, f"{gid}.{secrets.token_urlsafe(12)}")
             g.conn = ws
+            g.students = members
             self.groups[gid] = g
             g.venue = self.venue
             await self.reply(ws, {"op": "waiting", "group": name, "token": g.token, **self.simf()})
@@ -355,6 +386,20 @@ class Hub:
             log.info("group %s joined", name)
             self.changed()
             return
+        if op == "peek":     # v1.4: does this lesson want student IDs? (before the join form shows the ID keypad)
+            ok = self.code is not None and str(m.get("code", "")).strip() == self.code
+            return await self.reply(ws, {"op": "peek", "ok": ok, "roster": bool(ok and self.roster),
+                                         **({"label": self.roster["label"]} if ok and self.roster else {})})
+        if op == "check_student":   # v1.4: one ID as a student types it, before the group joins
+            if self.code is None or str(m.get("code", "")).strip() != self.code or not self.roster:
+                return await self.reply(ws, {"op": "student", "ok": False, "reason": "code"})
+            st = self.find_student(str(m.get("student", "")))
+            if not st:
+                await self.slow_miss()
+                return await self.reply(ws, {"op": "student", "ok": False, "reason": "student"})
+            if any(s["id"] == st["id"] for g in self.groups.values() for s in g.students):
+                return await self.reply(ws, {"op": "student", "ok": False, "reason": "student_taken"})
+            return await self.reply(ws, {"op": "student", "ok": True, "no": st["no"], "nick": st["nick"], "last4": st["last4"]})
         if op in ("resume", "ping"):
             token = str(m.get("token", ""))
             D = self.demo
@@ -427,8 +472,45 @@ class Hub:
         # ---------- teacher commands ----------
         if ws not in self.teachers:
             return await self.reply(ws, {"op": "error", "reason": "pin"})
+        if op in ("rosters", "roster_import"):
+            return await self.roster_op(ws, m)
         await self.teacher(m)
         self.changed()
+
+    # ---------- roster (database part 1, contract v1.4) ----------
+    def find_student(self, code: str) -> dict | None:
+        if self.db is None or not self.roster:
+            return None
+        try:
+            return self.db.find_student(self.roster["id"], code)
+        except Exception as e:
+            log.error("database: %s", e)
+            return None
+
+    async def slow_miss(self) -> None:
+        async with self._miss_lock:      # IDs not found queue up hub-wide, like wrong PINs
+            await asyncio.sleep(MISS_DELAY)
+
+    async def roster_op(self, ws: WS, m: dict) -> None:
+        if self.db is None:
+            return await self.reply(ws, {"op": "rosters", "list": [], "db": False})
+        try:
+            if m.get("op") == "roster_import":
+                r = m.get("room") if isinstance(m.get("room"), dict) else {}
+                cid = self.db.classroom(str(r.get("grade", "")), str(r.get("room", "")), str(r.get("level", "")),
+                                        int(r.get("year") or 0), int(r.get("term") or 0))
+                text = str(m.get("csv", ""))
+                if len(text) > 200_000:
+                    raise ValueError("ไฟล์ใหญ่เกินไป")
+                res = self.db.import_roster(cid, text)
+                log.info("roster %s: %d added, %d updated, %d errors", cid, res["added"], res["updated"], len(res["errors"]))
+                await self.reply(ws, {"op": "roster_done", **res})
+            await self.reply(ws, {"op": "rosters", "list": self.db.rosters(), "db": True})
+        except (ValueError, TypeError) as e:
+            await self.reply(ws, {"op": "error", "reason": "roster", "text": str(e)})
+        except Exception as e:
+            log.error("database: %s", e)
+            await self.reply(ws, {"op": "error", "reason": "roster", "text": "ฐานข้อมูลมีปัญหา"})
 
     async def check_pin(self, pin: str) -> tuple[bool, str | None]:
         """(PIN ok, user id). With active users in the database their PINs count and HUB_PIN does not."""
@@ -460,7 +542,16 @@ class Hub:
                 self.robots = [Robot(i + 1, f"หุ่น {i + 1} {COLOR_NAMES[i % 10]}", COLORS[i % 10], "") for i in range(max(1, min(self.sim, k)))]
                 self.venue = ""
             self.code = f"{random.randint(1000, 9999)}"
-            log.info("lesson open, code %s", self.code)
+            self.roster = None
+            if m.get("roster") and self.db is not None:
+                try:
+                    info = self.db.roster_info(str(m.get("roster")))
+                except Exception as e:
+                    log.error("database: %s", e)
+                    info = None
+                if info:
+                    self.roster = {"id": info["id"], "label": info["label"]}
+            log.info("lesson open, code %s%s", self.code, f", roster {self.roster['label']}" if self.roster else "")
             return
         if op == "close":
             await self.close_class()
@@ -567,7 +658,7 @@ class Hub:
             await self.tell(g, {"op": "revoked", "reason": "closed"})
             await self.tell(g, {"op": "expired"})
         self.groups.clear()
-        self.code, self.stop_all = None, False
+        self.code, self.stop_all, self.roster = None, False, None
         for r in self.robots:
             r.stopped = False
         await self.prune()

@@ -13,12 +13,15 @@ Setup and accounts from the command line on the teacher's PC (the installer does
 PINs are asked for without echo when --pin is not given (a PIN on the command line stays in the shell history).
 """
 import argparse
+import csv
+import io
 import datetime as dt
 import getpass
 import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -171,6 +174,108 @@ class DB:
             if left == 0:
                 raise ValueError("ต้องเหลือผู้ดูแล (school_admin หรือ installer) อย่างน้อย 1 คน")
         self.con.execute("UPDATE users SET active = ? WHERE id = ?", (int(active), u["id"]))
+
+    # ---------- part 1: classrooms and students (roster) ----------
+    def classroom(self, grade: str, room: str, level: str, year: int, term: int) -> str:
+        """the classroom with these keys, made if new"""
+        grade, room, level = grade.strip()[:12], room.strip()[:8], level.strip().upper()[:4]
+        if not grade or not re.fullmatch(r"L[1-6]", level) or term not in (1, 2, 3) or not 2500 <= year <= 2700:
+            raise ValueError("ข้อมูลห้องไม่ครบ: ชั้น, ระดับ L1–L6, ปีการศึกษา (พ.ศ.), ภาคเรียน 1–3")
+        r = self.con.execute("SELECT id FROM classrooms WHERE school_id = ? AND academic_year = ? AND term = ? AND grade = ? "
+                             "AND IFNULL(room,'') = ? AND level = ?", (self.school_id(), year, term, grade, room, level)).fetchone()
+        if r:
+            return r["id"]
+        cid = new_id()
+        self.con.execute("INSERT INTO classrooms (id, school_id, academic_year, term, grade, room, level) VALUES (?,?,?,?,?,?,?)",
+                         (cid, self.school_id(), year, term, grade, room or None, level))
+        return cid
+
+    def import_roster(self, cid: str, text: str) -> dict:
+        """CSV / tab text from the teacher: student ID (1–13 digits), number (เลขที่), nickname; other columns (names …)
+        are dropped. A header row may name the columns (รหัส / เลขที่ / ชื่อเล่น), else they are in that order.
+        Adds or updates students and enrols them in the classroom. The raw ID is only hashed, never stored."""
+        c = self.con.execute("SELECT * FROM classrooms WHERE id = ?", (cid,)).fetchone()
+        if not c:
+            raise ValueError("ไม่พบห้องเรียน")
+        lines = [ln for ln in text.replace("\ufeff", "").splitlines() if ln.strip()]
+        if len(lines) > 400:
+            raise ValueError("ไฟล์ยาวเกินไป (ไม่เกิน 400 คนต่อห้อง)")
+        delim = "\t" if any("\t" in ln for ln in lines[:3]) else ","
+        rows = list(csv.reader(io.StringIO("\n".join(lines)), delimiter=delim))
+        col = {"code": 0, "no": 1, "nick": 2}
+        start = 0
+        if rows and rows[0] and not re.sub(r"\D", "", rows[0][0]):   # a header row: its first cell has no digits
+            head = [h.strip().lower() for h in rows[0]]
+            found = {}
+            for i, h in enumerate(head):
+                if "code" not in found and ("รหัส" in h or h in ("id", "code", "student id", "student_id", "student code")):
+                    found["code"] = i
+                elif "no" not in found and ("เลขที่" in h or h in ("no", "no.", "number")):
+                    found["no"] = i
+                elif "nick" not in found and ("ชื่อเล่น" in h or "nick" in h):
+                    found["nick"] = i
+            if "code" not in found:
+                raise ValueError("ไม่พบคอลัมน์รหัสนักเรียนในหัวตาราง")
+            col = {"code": found["code"], "no": found.get("no", -1), "nick": found.get("nick", -1)}
+            start = 1
+        added = updated = 0
+        errors: list[dict] = []
+        seen: set[str] = set()
+        self.con.execute("BEGIN")
+        try:
+            for i, row in enumerate(rows[start:], start=start + 1):
+                cell = lambda k: row[col[k]].strip() if 0 <= col[k] < len(row) else ""
+                code = re.sub(r"[\s-]", "", cell("code"))
+                if not re.fullmatch(r"\d{1,13}", code):
+                    errors.append({"line": i, "reason": "รหัสต้องเป็นตัวเลข 1–13 หลัก"}); continue
+                h = self.code_hash(code)
+                if h in seen:
+                    errors.append({"line": i, "reason": "รหัสซ้ำในไฟล์"}); continue
+                seen.add(h)
+                no = cell("no")
+                no = int(no) if no.isdigit() and int(no) < 1000 else None
+                nick = cell("nick")[:24] or None
+                old = self.con.execute("SELECT id FROM students WHERE school_id = ? AND code_hash = ?", (c["school_id"], h)).fetchone()
+                if old:
+                    sid = old["id"]
+                    self.con.execute("UPDATE students SET grade = ?, room = ?, number = COALESCE(?, number), "
+                                     "nickname = COALESCE(?, nickname), archived_at = NULL WHERE id = ?",
+                                     (c["grade"], c["room"], no, nick, sid))
+                    updated += 1
+                else:
+                    sid = new_id()
+                    self.con.execute("INSERT INTO students (id, school_id, code_hash, code_last4, grade, room, number, nickname) "
+                                     "VALUES (?,?,?,?,?,?,?,?)", (sid, c["school_id"], h, code[-4:], c["grade"], c["room"], no, nick))
+                    added += 1
+                self.con.execute("INSERT OR IGNORE INTO enrollments (student_id, classroom_id) VALUES (?, ?)", (sid, cid))
+            self.con.execute("COMMIT")
+        except Exception:
+            self.con.execute("ROLLBACK")
+            raise
+        return {"id": cid, "added": added, "updated": updated, "errors": errors[:50]}
+
+    @staticmethod
+    def roster_label(c) -> str:
+        room = f"/{c['room']}" if c["room"] else ""
+        return f"{c['grade']}{room} · {c['level']} · {c['term']}/{c['academic_year']}"
+
+    def rosters(self) -> list[dict]:
+        rows = self.con.execute("SELECT c.*, COUNT(e.student_id) AS n FROM classrooms c LEFT JOIN enrollments e ON e.classroom_id = c.id "
+                                "GROUP BY c.id ORDER BY c.academic_year DESC, c.term DESC, c.grade, c.room").fetchall()
+        return [{"id": c["id"], "label": self.roster_label(c), "grade": c["grade"], "room": c["room"] or "", "level": c["level"],
+                 "year": c["academic_year"], "term": c["term"], "count": c["n"]} for c in rows]
+
+    def roster_info(self, cid: str) -> dict | None:
+        return next((r for r in self.rosters() if r["id"] == cid), None)
+
+    def find_student(self, cid: str, code: str) -> dict | None:
+        """the enrolled student with this ID in the classroom: {id, no, nick, last4}, or None"""
+        code = re.sub(r"[\s-]", "", str(code))
+        if not re.fullmatch(r"\d{1,13}", code):
+            return None
+        r = self.con.execute("SELECT s.id, s.number, s.nickname, s.code_last4 FROM students s JOIN enrollments e ON e.student_id = s.id "
+                             "WHERE e.classroom_id = ? AND s.code_hash = ? AND s.archived_at IS NULL", (cid, self.code_hash(code))).fetchone()
+        return {"id": r["id"], "no": r["number"], "nick": r["nickname"] or "", "last4": r["code_last4"]} if r else None
 
     # ---------- robots, licences, trainings ----------
     def add_robot(self, n: int, name: str = "", color: str = "", serial: str = "", firmware: str = "") -> str:

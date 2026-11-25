@@ -80,6 +80,24 @@ def test_db(tmp: Path) -> DB:
     ok(sqlite3.connect(files[-1]).execute("SELECT COUNT(*) FROM users").fetchone()[0] == 2, "backup copy is not the data")
     d.set_setting("last_backup", "2000-01-01")
     ok(d.backup_if_due(tmp / "bk") is not None and d.backup_if_due(tmp / "bk") is None, "backup_if_due not once a day")
+    # part 1: roster import (header row with a names column that must be dropped, dashes in IDs, bad lines)
+    raises(lambda: d.classroom("ป.5", "1", "L9", 2569, 2), "bad level accepted")
+    cid = d.classroom("ป.5", "1", "L2", 2569, 2)
+    ok(d.classroom("ป.5", "1", "l2", 2569, 2) == cid, "same classroom made twice")
+    csv_text = "\ufeffเลขที่,รหัสนักเรียน,ชื่อ-สกุล,ชื่อเล่น\n3,1-1007-01234-56-7,สมชาย ใจดี,ภูมิ\n7,1209900456781,สมหญิง รักเรียน,ต้นข้าว\n" \
+               "8,12AB,x,y\n9,1209900456781,ซ้ำ,ซ้ำ\n"
+    raises(lambda: d.import_roster(cid, "ชื่อ,นามสกุล\nก,ข\n"), "CSV without an ID column accepted")
+    r = d.import_roster(cid, csv_text.replace("เลขที่,รหัสนักเรียน", "เลขที่,รหัสนักเรียน"))
+    ok(r["added"] == 2 and r["updated"] == 0 and [e["line"] for e in r["errors"]] == [4, 5], f"roster import wrong: {r}")
+    dump = "\n".join(d.con.iterdump())
+    ok("1100701234567" not in dump and "สมชาย" not in dump and "สมหญิง" not in dump, "raw student ID or real name stored")
+    ok(d.find_student(cid, "1100701234567") == {"id": d.find_student(cid, "1-1007-01234-56-7")["id"], "no": 3, "nick": "ภูมิ", "last4": "4567"},
+       "student lookup wrong")
+    ok(d.find_student(cid, "1100701234568") is None, "unknown ID found")
+    r2 = d.import_roster(cid, "1100701234567\t3\tภูมิใจ\n")
+    ok(r2["added"] == 0 and r2["updated"] == 1 and d.find_student(cid, "1100701234567")["nick"] == "ภูมิใจ", f"re-import wrong: {r2}")
+    ro = d.rosters()
+    ok(len(ro) == 1 and ro[0]["count"] == 2 and ro[0]["label"] == "ป.5/1 · L2 · 2/2569", f"rosters wrong: {ro}")
     # command line
     p = str(tmp / "cli.db")
     ok(cli(["--db", p, "setup", "--school", "ร.ร.", "--admin", "ผอ.", "--pin", "135792"]) == 0, "cli setup failed")
@@ -109,6 +127,54 @@ def main() -> int:
             ok((await ask("2468"))["op"] == "error", "HUB_PIN still works once the database has users")
             ok((await ask("802461"))["op"] == "class", "teacher's own PIN refused")
             ok(list(hub.teacher_user.values()) == [d.user_by_pin("802461")["id"]], "hub did not record who signed in")
+            # v1.4: a lesson with a roster: students join with their IDs
+            cid = d.rosters()[0]["id"]
+            await ws.send(json.dumps({"op": "rosters"}))
+            r = json.loads(await asyncio.wait_for(ws.recv(), 5))
+            ok(r["op"] == "rosters" and r["list"][0]["id"] == cid, "rosters op wrong")
+            await ws.send(json.dumps({"op": "roster_import", "room": {"grade": "ป.5", "room": "1", "level": "L2", "year": 2569, "term": 2},
+                                      "csv": "1103300987654,12,มายด์"}))
+            r = json.loads(await asyncio.wait_for(ws.recv(), 5))
+            ok(r["op"] == "roster_done" and r["added"] == 1 and r["id"] == cid, f"roster_import op wrong: {r}")
+            await ws.recv()   # rosters
+            await ws.send(json.dumps({"op": "open", "robots": 2, "roster": cid}))
+            st = None
+            for _ in range(5):
+                r = json.loads(await asyncio.wait_for(ws.recv(), 5))
+                if r["op"] == "class" and r["state"]:
+                    st = r["state"]; break
+            ok(st and st.get("roster", {}).get("id") == cid, "lesson has no roster")
+            code = st["code"]
+            s1 = await connect(f"ws://127.0.0.1:{port}/class")
+
+            async def say(m: dict) -> dict:
+                await s1.send(json.dumps(m))
+                while True:
+                    x = json.loads(await asyncio.wait_for(s1.recv(), 5))
+                    if x["op"] not in ("style", "demo"):
+                        return x
+
+            x = await say({"op": "peek", "code": code})
+            ok(x == {"op": "peek", "ok": True, "roster": True, "label": "ป.5/1 · L2 · 2/2569"}, f"peek wrong: {x}")
+            x = await say({"op": "check_student", "code": code, "student": "1-1007-01234-56-7"})
+            ok(x.get("ok") and x["nick"] == "ภูมิใจ" and x["last4"] == "4567", f"check_student wrong: {x}")
+            x = await say({"op": "check_student", "code": code, "student": "9999999999999"})
+            ok(x == {"op": "student", "ok": False, "reason": "student"}, f"unknown ID accepted: {x}")
+            x = await say({"op": "join", "code": code, "group": "แมว"})
+            ok(x == {"op": "error", "reason": "students"}, f"join without IDs accepted: {x}")
+            x = await say({"op": "join", "code": code, "group": "แมว", "students": ["1100701234567", "0000000000000"]})
+            ok(x == {"op": "error", "reason": "student", "bad": [1]}, f"bad ID in join: {x}")
+            x = await say({"op": "join", "code": code, "group": "แมว", "students": ["1100701234567", "1209900456781"]})
+            ok(x["op"] == "waiting", f"join with IDs refused: {x}")
+            s2 = await connect(f"ws://127.0.0.1:{port}/class")
+            await s2.send(json.dumps({"op": "join", "code": code, "group": "หมา", "students": ["1103300987654", "1209900456781"]}))
+            x = json.loads(await asyncio.wait_for(s2.recv(), 5))
+            ok(x == {"op": "error", "reason": "student_taken", "bad": [1]}, f"student in two groups: {x}")
+            g = [v for v in hub.groups.values()][0].card()
+            ok(g["students"] == [{"no": 3, "nick": "ภูมิใจ", "last4": "4567"}, {"no": 7, "nick": "ต้นข้าว", "last4": "6781"}],
+               f"group card students wrong: {g}")
+            ok("id" not in str(g["students"]), "student db ids leak to the teacher page")
+            await s1.close(); await s2.close()
             await ws.close()
             task.cancel()
             # no users in the database: HUB_PIN works
