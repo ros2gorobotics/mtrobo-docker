@@ -224,6 +224,28 @@ async def main() -> None:
     ok(PA.closed(), "robot connection stayed open after unassign")
     ok(A.last("waiting") and A.last("revoked")["reason"] == "teacher", "A not sent back to wait")
 
+    # ---------- hint look for the whole class (contract v1.3) ----------
+    await T.send({"op": "style", "hint": {"look": "cream", "font": "round", "x": 1}})
+    await settle()
+    ok(B2.last("style") and B2.last("style")["hint"] == {"look": "cream", "font": "round"}, f"style not sent to groups: {B2.last('style')}")
+    ok(T.last("class")["state"].get("hint") == {"look": "cream", "font": "round"}, "style not in the class state")
+    await T.send({"op": "style", "hint": {"look": "nope"}})
+    await settle()
+    ok(B2.last("style")["hint"] == {"look": "dark", "font": "app"}, "bad style not cleaned")
+    await T.send({"op": "style", "hint": {"look": "blue", "font": "app"}})
+    L = Client(await page("/class"))
+    await L.send({"op": "join", "code": code, "group": "ปลา"})
+    await settle()
+    ok(L.last("style") and L.last("style")["hint"]["look"] == "blue", "a group joining later got no style")
+    L2 = Client(await page("/class"))
+    await L2.send({"op": "resume", "token": L.last("waiting")["token"]})
+    await settle()
+    ok(L2.last("style") and L2.last("style")["hint"]["look"] == "blue", "resume got no style")
+    S2 = Client(await page("/class"))
+    await S2.send({"op": "style", "hint": {"look": "purple"}})
+    await settle()
+    ok(S2.last("error") and S2.last("error")["reason"] == "pin", "style accepted without the teacher PIN")
+
     # ---------- close ----------
     await T.send({"op": "close"})
     await settle()

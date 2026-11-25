@@ -186,6 +186,8 @@ class Hub:
         self.teach_conn: WS | None = None
         self.proxies: set[Proxy] = set()
         self._push_due = False
+        # how hints look on every page of the class (contract v1.3): kept across lessons
+        self.hint: dict | None = None
         self._last_state = ""
         self._pin_lock = asyncio.Lock()
 
@@ -203,6 +205,8 @@ class Hub:
              "groups": [g.card() for g in self.groups.values()], "demo": self.demo}
         if self.sim:
             s["venue"] = self.venue
+        if self.hint:
+            s["hint"] = self.hint
         if self.join:
             s["join"] = self.join
         return s
@@ -334,6 +338,8 @@ class Hub:
             self.groups[gid] = g
             g.venue = self.venue
             await self.reply(ws, {"op": "waiting", "group": name, "token": g.token, **self.simf()})
+            if self.hint:
+                await self.reply(ws, {"op": "style", "hint": self.hint})
             if self.demo and self.demo["to"] is None:
                 await self.reply(ws, self.demo_on())
             log.info("group %s joined", name)
@@ -357,6 +363,8 @@ class Hub:
             if op == "ping":
                 return await self.reply(ws, {"op": "pong"})
             await self.reply(ws, self.status(g))
+            if self.hint:
+                await self.reply(ws, {"op": "style", "hint": self.hint})
             if self.stop_all:
                 await self.reply(ws, {"op": "stop_all", "on": True})
             if D and D["by"] == g.id:
@@ -412,6 +420,13 @@ class Hub:
 
     async def teacher(self, m: dict) -> None:
         op = m.get("op")
+        if op == "style":   # also with no lesson open: the next lesson starts with it
+            h = m.get("hint") if isinstance(m.get("hint"), dict) else {}
+            self.hint = {"look": h.get("look") if h.get("look") in ("dark", "cream", "purple", "blue") else "dark",
+                         "font": "round" if h.get("font") == "round" else "app"}
+            for g in self.groups.values():
+                await self.tell(g, {"op": "style", "hint": self.hint})
+            return
         if op == "open":
             await self.close_class()
             if self.sim:   # the teacher picks how many simulated robots (up to HUB_SIM)
