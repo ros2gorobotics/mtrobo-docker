@@ -9,7 +9,9 @@ command goes through here, so the teacher's choices are enforced, not just hidde
 only; groups are the names students type, nothing else (PDPA).
 
 Config (environment):
-  HUB_PIN          teacher PIN (digits)                        default 1234 (change it!)
+  HUB_PIN          teacher PIN (digits)                        default 1234 (change it!); used only while the database
+                   has no active users. Once `python db.py setup` has run, each teacher signs in with their own PIN.
+  HUB_DB           classroom database file (SQLite)            default /data/mtrobo.db; empty = no database
   HUB_ROBOTS       robots, comma separated: url | name|url | name|#colour|url   default ws://mtrobo:9090
   CLASS_JOIN_URL   the link students open, e.g. http://192.168.1.105:3000/join (shown as a QR on the teacher page)
   HUB_MAX_V        class speed cap, m/s (forwarded cmd_vel)    default 0.25
@@ -29,6 +31,11 @@ import secrets
 import time
 
 from wsproto import WS, Closed, connect, serve
+
+try:
+    from db import DB, pin_matches
+except ImportError:      # an old image without db.py
+    DB, pin_matches = None, None
 
 log = logging.getLogger("hub")
 
@@ -171,8 +178,11 @@ class Proxy:
 
 
 class Hub:
-    def __init__(self, pin: str, robots: list[Robot], join: str = "", max_v: float = 0.25, max_w: float = 1.0, sim: int = 0):
+    def __init__(self, pin: str, robots: list[Robot], join: str = "", max_v: float = 0.25, max_w: float = 1.0, sim: int = 0,
+                 db=None):
         self.pin, self.robots, self.join, self.max_v, self.max_w = pin, robots, join, max_v, max_w
+        self.db = db                      # classroom database (db.py), or None
+        self.teacher_user: dict = {}      # teacher page -> the user id that signed in (None = HUB_PIN)
         self.sim = max(0, min(10, sim))     # > 0: simulated robots only (HUB_SIM)
         self.venue = ""                     # simulated classes: the lesson's venue
         self.code: str | None = None
@@ -224,7 +234,7 @@ class Hub:
             try:
                 await t.send(s)
             except Closed:
-                self.teachers.discard(t)
+                self.teachers.discard(t); self.teacher_user.pop(t, None)
 
     async def tell(self, g: Group | None, msg: dict) -> None:
         if g and g.conn and not g.conn.closed:
@@ -319,7 +329,7 @@ class Hub:
                     await self.handle(ws, m)
                     await self.push()      # teacher pages see joins, assignments … at once (unchanged state is not resent)
         finally:
-            self.teachers.discard(ws)
+            self.teachers.discard(ws); self.teacher_user.pop(ws, None)
 
     async def handle(self, ws: WS, m: dict) -> None:
         op = m.get("op")
@@ -404,12 +414,14 @@ class Hub:
                 await self.tell(g, out)
             return
         if op == "teacher":
-            if not secrets.compare_digest(str(m.get("pin", "")).encode(), self.pin.encode()):
+            ok, user = await self.check_pin(str(m.get("pin", "")))
+            if not ok:
                 log.warning("wrong teacher PIN from %s", ws.peer)
                 async with self._pin_lock:          # wrong PINs queue up hub-wide; the right PIN never waits
                     await asyncio.sleep(PIN_DELAY)
                 return await self.reply(ws, {"op": "error", "reason": "pin"})
             self.teachers.add(ws)
+            self.teacher_user[ws] = user
             await self.reply(ws, {"op": "class", "state": self.state(), **self.simf()})
             return
         # ---------- teacher commands ----------
@@ -417,6 +429,20 @@ class Hub:
             return await self.reply(ws, {"op": "error", "reason": "pin"})
         await self.teacher(m)
         self.changed()
+
+    async def check_pin(self, pin: str) -> tuple[bool, str | None]:
+        """(PIN ok, user id). With active users in the database their PINs count and HUB_PIN does not."""
+        if self.db is not None:
+            try:
+                rows = [(u["id"], u["pin_hash"]) for u in self.db.con.execute("SELECT id, pin_hash FROM users WHERE active = 1")]
+            except Exception as e:  # the class must still open if the database is broken
+                log.error("database: %s", e)
+                rows = []
+            if rows:
+                # scrypt takes ~50 ms per user: off the event loop, so robot streams never stall
+                uid = await asyncio.to_thread(lambda: next((i for i, h in rows if pin_matches(pin, h)), None))
+                return uid is not None, uid
+        return secrets.compare_digest(pin.encode(), self.pin.encode()), None
 
     async def teacher(self, m: dict) -> None:
         op = m.get("op")
@@ -649,9 +675,18 @@ class Hub:
         await ws.close(4004)
 
     async def ticker(self) -> None:
+        n = 0
         while True:
             await asyncio.sleep(1)
             await self.push()
+            n += 1
+            if self.db is not None and n % 3600 == 10:      # 10 s after start, then hourly: one copy per day
+                try:
+                    out = self.db.backup_if_due()
+                    if out:
+                        log.info("database backup: %s", out)
+                except Exception as e:
+                    log.error("database backup failed: %s", e)
 
     async def run(self, host: str = "0.0.0.0", port: int = 9000) -> None:
         server = await serve(self.route, host, port)
@@ -684,8 +719,16 @@ def main() -> None:
         log.warning("HUB_PIN is shorter than 6 digits: easier to guess")
     sim = int(os.environ.get("HUB_SIM", "0") or 0)
     robots = [] if sim > 0 else robots_from_env(os.environ.get("HUB_ROBOTS", "ws://mtrobo:9090"))
+    db = None
+    path = os.environ.get("HUB_DB", "/data/mtrobo.db")
+    if path and DB is not None:
+        try:
+            db = DB(path)
+            log.info("database %s (%s)", path, "teachers' own PINs" if db.has_users() else "no users yet: HUB_PIN, run db.py setup")
+        except Exception as e:
+            log.error("database %s not opened, class runs without it: %s", path, e)
     hub = Hub(pin, robots, os.environ.get("CLASS_JOIN_URL", ""),
-              float(os.environ.get("HUB_MAX_V", "0.25")), float(os.environ.get("HUB_MAX_W", "1.0")), sim)
+              float(os.environ.get("HUB_MAX_V", "0.25")), float(os.environ.get("HUB_MAX_W", "1.0")), sim, db)
     asyncio.run(hub.run(port=int(os.environ.get("HUB_PORT", "9000"))))
 
 

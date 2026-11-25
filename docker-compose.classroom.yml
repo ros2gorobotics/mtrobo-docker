@@ -28,6 +28,12 @@ services:
       HUB_MAX_V: ${HUB_MAX_V:-0.25}                   # ความเร็วสูงสุดของนักเรียน m/s
       HUB_MAX_W: ${HUB_MAX_W:-1.0}                    # หมุนเร็วสุด rad/s
       HUB_SIM: ${HUB_SIM:-0}                          # > 0 = ห้องเรียนจำลองข้ามเครื่อง ไม่มีหุ่น (จำนวนหุ่นจำลองสูงสุด)
+      HUB_DB: /data/mtrobo.db                         # ฐานข้อมูลห้องเรียนบนเครื่องครู (สำรองทุกวันใน /data/backup)
+    volumes:
+      - mtrobo_class_data:/data
     depends_on:
       - mtrobo
     restart: unless-stopped
+
+volumes:
+  mtrobo_class_data:
