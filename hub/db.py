@@ -1,0 +1,304 @@
+"""MTRobo classroom database on the teacher's PC (contract: mtrobo docs/contracts/database.md, part 4: admin / teachers).
+
+SQLite, Python standard library only. The hub is the only writer. schema.sql is a copy of the contract's
+docs/contracts/db/schema.sql: change both together.
+
+Setup and accounts from the command line on the teacher's PC (the installer does this once):
+
+    docker compose -f docker-compose.yml -f docker-compose.classroom.yml exec hub python db.py setup
+    docker compose ... exec hub python db.py add-user --role teacher --name "ครูสมศรี"
+    docker compose ... exec hub python db.py users
+    docker compose ... exec hub python db.py --help
+
+PINs are asked for without echo when --pin is not given (a PIN on the command line stays in the shell history).
+"""
+import argparse
+import datetime as dt
+import getpass
+import hashlib
+import hmac
+import logging
+import os
+import secrets
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
+
+log = logging.getLogger("db")
+
+HERE = Path(__file__).resolve().parent
+ROLES = ("installer", "school_admin", "teacher")
+SCHOOL_TYPES = ("public", "private", "tutor", "club")
+BACKUPS_KEPT = 14
+SCRYPT = dict(n=2 ** 14, r=8, p=1, dklen=32)   # ~50 ms per check: fine for a few teachers, slow for guessing
+
+
+def utcnow() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+
+def hash_pin(pin: str) -> str:
+    salt = secrets.token_bytes(16)
+    h = hashlib.scrypt(pin.encode(), salt=salt, **SCRYPT)
+    return f"scrypt${salt.hex()}${h.hex()}"
+
+
+def pin_matches(pin: str, stored: str) -> bool:
+    try:
+        kind, salt, h = stored.split("$")
+    except ValueError:
+        return False
+    if kind != "scrypt":
+        return False
+    got = hashlib.scrypt(pin.encode(), salt=bytes.fromhex(salt), **SCRYPT)
+    return hmac.compare_digest(got.hex(), h)
+
+
+def check_pin_rules(pin: str) -> str | None:
+    """None if the PIN is acceptable, else why not (Thai, shown to the installer)"""
+    if not pin.isdigit():
+        return "PIN ต้องเป็นตัวเลขเท่านั้น"
+    if len(pin) < 6:
+        return "PIN ต้องยาวอย่างน้อย 6 หลัก"
+    if len(set(pin)) == 1 or pin in "0123456789" or pin in "9876543210":
+        return "PIN เดาง่ายเกินไป (เลขซ้ำหรือเรียงกัน)"
+    return None
+
+
+class DB:
+    def __init__(self, path: str | Path):
+        self.path = str(path)
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.con = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        self.con.row_factory = sqlite3.Row
+        self.con.execute("PRAGMA foreign_keys = ON")
+        if not self.con.execute("SELECT 1 FROM sqlite_master WHERE name = 'schema_version'").fetchone():
+            self.con.executescript((HERE / "schema.sql").read_text(encoding="utf-8"))
+            log.info("database created: %s", self.path)
+        if self.setting("code_secret") is None:
+            self.set_setting("code_secret", secrets.token_hex(32))
+
+    # ---------- settings ----------
+    def setting(self, key: str) -> str | None:
+        r = self.con.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return r["value"] if r else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.con.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                         (key, value))
+
+    def code_hash(self, code: str) -> str:
+        """student ID -> HMAC with this PC's secret (contract: the raw ID is never stored). Digits only."""
+        digits = "".join(ch for ch in code if ch.isdigit())
+        return hmac.new(bytes.fromhex(self.setting("code_secret")), digits.encode(), hashlib.sha256).hexdigest()
+
+    # ---------- school ----------
+    def school(self) -> sqlite3.Row | None:
+        return self.con.execute("SELECT * FROM schools LIMIT 1").fetchone()
+
+    def setup(self, name: str, province: str = "", type_: str = "public", connext_ed: bool = False,
+              partner: str = "") -> str:
+        if self.school():
+            raise ValueError("ตั้งค่าโรงเรียนไว้แล้ว (เครื่องนี้มีได้ 1 โรงเรียน)")
+        if type_ not in SCHOOL_TYPES:
+            raise ValueError(f"type ต้องเป็นหนึ่งใน {', '.join(SCHOOL_TYPES)}")
+        sid = new_id()
+        self.con.execute("INSERT INTO schools (id, name, province, type, is_connext_ed, school_partner) VALUES (?,?,?,?,?,?)",
+                         (sid, name, province or None, type_, int(connext_ed), partner or None))
+        return sid
+
+    def school_id(self) -> str:
+        s = self.school()
+        if not s:
+            raise ValueError("ยังไม่ได้ตั้งค่าโรงเรียน: รัน python db.py setup ก่อน")
+        return s["id"]
+
+    # ---------- users ----------
+    def add_user(self, role: str, full_name: str, pin: str, email: str = "") -> str:
+        if role not in ROLES:
+            raise ValueError(f"role ต้องเป็นหนึ่งใน {', '.join(ROLES)}")
+        why = check_pin_rules(pin)
+        if why:
+            raise ValueError(why)
+        if self.user_by_pin(pin):
+            raise ValueError("PIN นี้มีคนใช้แล้ว ใช้ PIN อื่น")   # the PIN alone says who signs in
+        uid = new_id()
+        self.con.execute("INSERT INTO users (id, school_id, role, full_name, email, pin_hash, active, created_at) "
+                         "VALUES (?,?,?,?,?,?,1,?)", (uid, self.school_id(), role, full_name, email or None, hash_pin(pin), utcnow()))
+        return uid
+
+    def users(self, active_only: bool = False) -> list[sqlite3.Row]:
+        q = "SELECT id, role, full_name, email, active, created_at FROM users"
+        return self.con.execute(q + (" WHERE active = 1" if active_only else "") + " ORDER BY created_at").fetchall()
+
+    def has_users(self) -> bool:
+        return self.con.execute("SELECT 1 FROM users WHERE active = 1 LIMIT 1").fetchone() is not None
+
+    def user_by_pin(self, pin: str) -> sqlite3.Row | None:
+        """the active user whose PIN this is, or None. Checks every active user (a few teachers per PC)."""
+        for u in self.con.execute("SELECT * FROM users WHERE active = 1").fetchall():
+            if pin_matches(pin, u["pin_hash"]):
+                return u
+        return None
+
+    def find_user(self, key: str) -> sqlite3.Row:
+        rows = self.con.execute("SELECT * FROM users WHERE id LIKE ? OR full_name = ?", (key + "%", key)).fetchall()
+        if len(rows) != 1:
+            raise ValueError("ไม่พบผู้ใช้" if not rows else "พบหลายคน: ใช้ id ให้ยาวขึ้น")
+        return rows[0]
+
+    def set_pin(self, key: str, pin: str) -> None:
+        u = self.find_user(key)
+        why = check_pin_rules(pin)
+        if why:
+            raise ValueError(why)
+        other = self.user_by_pin(pin)
+        if other and other["id"] != u["id"]:
+            raise ValueError("PIN นี้มีคนใช้แล้ว ใช้ PIN อื่น")
+        self.con.execute("UPDATE users SET pin_hash = ? WHERE id = ?", (hash_pin(pin), u["id"]))
+
+    def set_active(self, key: str, active: bool) -> None:
+        u = self.find_user(key)
+        if not active and u["role"] in ("installer", "school_admin"):
+            left = self.con.execute("SELECT COUNT(*) FROM users WHERE active = 1 AND role IN ('installer','school_admin') "
+                                    "AND id != ?", (u["id"],)).fetchone()[0]
+            if left == 0:
+                raise ValueError("ต้องเหลือผู้ดูแล (school_admin หรือ installer) อย่างน้อย 1 คน")
+        self.con.execute("UPDATE users SET active = ? WHERE id = ?", (int(active), u["id"]))
+
+    # ---------- robots, licences, trainings ----------
+    def add_robot(self, n: int, name: str = "", color: str = "", serial: str = "", firmware: str = "") -> str:
+        rid = new_id()
+        self.con.execute("INSERT INTO robots (id, school_id, n, serial, name, color, firmware) VALUES (?,?,?,?,?,?,?)",
+                         (rid, self.school_id(), n, serial or None, name or None, color or None, firmware or None))
+        return rid
+
+    def robots(self) -> list[sqlite3.Row]:
+        return self.con.execute("SELECT * FROM robots ORDER BY n").fetchall()
+
+    def add_license(self, package: str, robot_count: int, starts_on: str, ends_on: str, price_thb: float | None = None) -> str:
+        dt.date.fromisoformat(starts_on), dt.date.fromisoformat(ends_on)
+        lid = new_id()
+        self.con.execute("INSERT INTO licenses (id, school_id, package, robot_count, price_thb, starts_on, ends_on) "
+                         "VALUES (?,?,?,?,?,?,?)", (lid, self.school_id(), package, robot_count, price_thb, starts_on, ends_on))
+        return lid
+
+    def licenses(self) -> list[sqlite3.Row]:
+        return self.con.execute("SELECT * FROM licenses ORDER BY starts_on").fetchall()
+
+    def add_training(self, key: str, course: str, level: str = "", passed_on: str = "", teach_alone: bool = False) -> str:
+        u = self.find_user(key)
+        if passed_on:
+            dt.date.fromisoformat(passed_on)
+        tid = new_id()
+        self.con.execute("INSERT INTO teacher_trainings (id, user_id, course, level, passed_on, can_teach_alone) VALUES (?,?,?,?,?,?)",
+                         (tid, u["id"], course, level or None, passed_on or None, int(teach_alone)))
+        return tid
+
+    # ---------- backup ----------
+    def backup(self, folder: str | Path | None = None, today: str | None = None) -> Path:
+        """a consistent copy (VACUUM INTO) as mtrobo-YYYY-MM-DD.db; keeps the newest BACKUPS_KEPT"""
+        folder = Path(folder or Path(self.path).parent / "backup")
+        folder.mkdir(parents=True, exist_ok=True)
+        today = today or dt.date.today().isoformat()
+        out = folder / f"mtrobo-{today}.db"
+        if out.exists():
+            out.unlink()
+        self.con.execute("VACUUM INTO ?", (str(out),))
+        self.set_setting("last_backup", today)
+        for old in sorted(folder.glob("mtrobo-*.db"))[:-BACKUPS_KEPT]:
+            old.unlink()
+        return out
+
+    def backup_if_due(self, folder: str | Path | None = None) -> Path | None:
+        today = dt.date.today().isoformat()
+        if self.setting("last_backup") == today or not self.school():
+            return None
+        return self.backup(folder, today)
+
+
+# ---------- command line (installer / school admin on the teacher's PC) ----------
+def ask_pin(given: str | None) -> str:
+    if given:
+        return given
+    a = getpass.getpass("PIN (ตัวเลข 6 หลักขึ้นไป): ")
+    b = getpass.getpass("PIN อีกครั้ง: ")
+    if a != b:
+        raise ValueError("PIN สองครั้งไม่ตรงกัน")
+    return a
+
+
+def cli(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="db.py", description="ฐานข้อมูลห้องเรียน MTRobo บนเครื่องครู")
+    p.add_argument("--db", default=os.environ.get("HUB_DB", "/data/mtrobo.db"), help="ไฟล์ฐานข้อมูล (HUB_DB)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("setup", help="ตั้งค่าโรงเรียนและผู้ดูแลคนแรก (ครั้งเดียว)")
+    s.add_argument("--school", required=True); s.add_argument("--province", default="")
+    s.add_argument("--type", default="public", choices=SCHOOL_TYPES)
+    s.add_argument("--connext-ed", action="store_true"); s.add_argument("--partner", default="")
+    s.add_argument("--admin", required=True, help="ชื่อผู้ดูแลของโรงเรียน (school_admin)")
+    s.add_argument("--pin")
+    s = sub.add_parser("add-user", help="เพิ่มครูหรือผู้ดูแล")
+    s.add_argument("--role", default="teacher", choices=ROLES); s.add_argument("--name", required=True)
+    s.add_argument("--email", default=""); s.add_argument("--pin")
+    sub.add_parser("users", help="รายชื่อผู้ใช้")
+    s = sub.add_parser("set-pin", help="เปลี่ยน PIN"); s.add_argument("user", help="id (ต้นๆ ก็ได้) หรือชื่อ"); s.add_argument("--pin")
+    s = sub.add_parser("disable", help="ปิดผู้ใช้"); s.add_argument("user")
+    s = sub.add_parser("enable", help="เปิดผู้ใช้อีกครั้ง"); s.add_argument("user")
+    s = sub.add_parser("add-robot", help="เพิ่มหุ่น"); s.add_argument("--n", type=int, required=True)
+    s.add_argument("--name", default=""); s.add_argument("--color", default=""); s.add_argument("--serial", default="")
+    s = sub.add_parser("add-license", help="เพิ่ม license"); s.add_argument("--package", required=True)
+    s.add_argument("--robots", type=int, required=True); s.add_argument("--from", dest="starts", required=True)
+    s.add_argument("--to", dest="ends", required=True); s.add_argument("--price", type=float)
+    s = sub.add_parser("add-training", help="บันทึกการอบรมครู"); s.add_argument("user"); s.add_argument("--course", required=True)
+    s.add_argument("--level", default=""); s.add_argument("--passed", default="", help="YYYY-MM-DD")
+    s.add_argument("--teach-alone", action="store_true")
+    s = sub.add_parser("info", help="สรุปโรงเรียน หุ่น license")
+    s = sub.add_parser("backup", help="สำรองข้อมูลตอนนี้"); s.add_argument("--to", default=None)
+    a = p.parse_args(argv)
+    db = DB(a.db)
+    try:
+        if a.cmd == "setup":
+            db.setup(a.school, a.province, a.type, a.connext_ed, a.partner)
+            db.add_user("school_admin", a.admin, ask_pin(a.pin))
+            print(f"ตั้งค่าแล้ว: {a.school} ผู้ดูแล {a.admin}")
+        elif a.cmd == "add-user":
+            uid = db.add_user(a.role, a.name, ask_pin(a.pin), a.email)
+            print(f"เพิ่มแล้ว: {a.name} ({a.role}) id {uid[:8]}")
+        elif a.cmd == "users":
+            for u in db.users():
+                print(f"{u['id'][:8]}  {u['role']:<12} {'ใช้งาน' if u['active'] else 'ปิด':<6} {u['full_name']}")
+        elif a.cmd == "set-pin":
+            db.set_pin(a.user, ask_pin(a.pin)); print("เปลี่ยน PIN แล้ว")
+        elif a.cmd in ("disable", "enable"):
+            db.set_active(a.user, a.cmd == "enable"); print("เปลี่ยนแล้ว")
+        elif a.cmd == "add-robot":
+            db.add_robot(a.n, a.name, a.color, a.serial); print(f"เพิ่มหุ่น {a.n} แล้ว")
+        elif a.cmd == "add-license":
+            db.add_license(a.package, a.robots, a.starts, a.ends, a.price); print("เพิ่ม license แล้ว")
+        elif a.cmd == "add-training":
+            db.add_training(a.user, a.course, a.level, a.passed, a.teach_alone); print("บันทึกแล้ว")
+        elif a.cmd == "info":
+            s = db.school()
+            print(f"โรงเรียน: {s['name'] if s else '(ยังไม่ตั้งค่า)'}")
+            for r in db.robots():
+                print(f"หุ่น {r['n']}: {r['name'] or ''} {r['color'] or ''}")
+            for l in db.licenses():
+                print(f"license {l['package']} หุ่น {l['robot_count']} ตัว {l['starts_on']} ถึง {l['ends_on']}")
+            print(f"สำรองล่าสุด: {db.setting('last_backup') or '-'}")
+        elif a.cmd == "backup":
+            print(f"สำรองแล้ว: {db.backup(a.to)}")
+    except (ValueError, sqlite3.IntegrityError) as e:
+        print(f"ไม่สำเร็จ: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

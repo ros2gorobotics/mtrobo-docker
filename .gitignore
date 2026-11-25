@@ -4,3 +4,4 @@ ros2ready/
 docker-compose.override.yml
 mtrobo_manager.py
 mtrobo/
+__pycache__/

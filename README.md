@@ -301,3 +301,21 @@ exit                       # ออกจาก container
 กลับไปใช้หุ่นจริง: ลบ `HUB_SIM` ออกจาก `.env` แล้วรันคำสั่งในข้อ 4 ด้านบนอีกครั้ง
 
 ทดสอบฮับโดยไม่ใช้หุ่น: `cd hub && python3 test_hub.py`
+
+### ฐานข้อมูลห้องเรียนบนเครื่องครู (ส่วนที่ 1: ผู้ดูแลและครู)
+
+ฮับเก็บข้อมูลห้องเรียนในไฟล์ SQLite ใน volume `mtrobo_class_data` (`/data/mtrobo.db`) อยู่ต่อแม้อัปเดต image
+และสำรองให้วันละครั้งใน `/data/backup` (เก็บ 14 วันล่าสุด) แบบฐานข้อมูล: `docs/contracts/database.md` ใน repo mtrobo
+
+ตั้งค่าครั้งแรก (ทีมติดตั้ง ทำครั้งเดียว ระบบจะถาม PIN โดยไม่แสดงบนจอ PIN ต้องเป็นตัวเลข 6 หลักขึ้นไป):
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.classroom.yml exec hub python db.py setup --school "ชื่อโรงเรียน" --province "จังหวัด" --admin "ชื่อผู้ดูแล"
+docker compose -f docker-compose.yml -f docker-compose.classroom.yml exec hub python db.py add-user --name "ครูสมศรี"
+docker compose -f docker-compose.yml -f docker-compose.classroom.yml exec hub python db.py add-robot --n 1 --name "แมวส้ม" --color "#f97316"
+docker compose -f docker-compose.yml -f docker-compose.classroom.yml exec hub python db.py add-license --package L2 --robots 1 --from 2026-11-01 --to 2028-10-31 --price 19900
+```
+- **เมื่อมีผู้ใช้ในฐานข้อมูลแล้ว ครูแต่ละคนเข้าหน้าครูด้วย PIN ของตัวเอง และ `HUB_PIN` ใช้ไม่ได้อีก** ก่อนตั้งค่ายังใช้ `HUB_PIN` ตามเดิม
+- คำสั่งอื่น: `users` (รายชื่อ), `set-pin <ชื่อ>`, `disable <ชื่อ>`, `enable <ชื่อ>`, `add-training <ชื่อ> --course ... --passed YYYY-MM-DD --teach-alone`, `info`, `backup` ดูทั้งหมดด้วย `python db.py --help`
+- คัดลอกไฟล์สำรองออกจากเครื่อง (เช่น ใส่ USB): `docker cp mtrobo_hub:/data/backup .`
+
+ทดสอบ: `cd hub && python3 test_db.py`
