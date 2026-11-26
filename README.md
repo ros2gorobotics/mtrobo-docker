@@ -215,6 +215,40 @@ exit                       # ออกจาก container
 
 ---
 
+## กล้องมือถือบนหุ่น (ไม่บังคับ)
+
+ติดมือถือไว้บนหุ่น แล้วภาพจากกล้องมือถือจะขึ้นในหน้าต่าง "กล้องหุ่นยนต์" ของหน้าเว็บ MTRobo (topic `/camera/image/compressed`)
+ใช้ได้ทั้งดูภาพสด ถ่ายรูป และบล็อก AI
+
+**ตั้งมือถือ**
+- **Android:** ติดตั้งแอป **IP Webcam** → Video preferences → ตั้ง Video resolution เป็น **640×480** และ Quality ประมาณ **60–70** → กด **Start server**
+  แอปจะแสดง IP เช่น `http://192.168.1.50:8080` ภาพเดียวอยู่ที่ `/shot.jpg` ส่วน `/video` เป็น MJPEG
+- **iPhone:** ใช้แอป IP camera ที่ให้ URL ภาพ JPEG หรือ MJPEG ได้ (ยังไม่ได้ทดสอบว่าแอปไหนใช้ได้)
+- มือถือต้องต่อ Wi-Fi วงเดียวกับเครื่องนี้ และควรจอง IP มือถือให้คงที่ที่ router (DHCP reservation)
+- ปิดล็อกจอและโหมดประหยัดแบต ไม่อย่างนั้นแอปจะหยุดส่งภาพ ถ้าทำได้ให้เสียบชาร์จไว้
+- ยึดมือถือให้แน่น กล้องหันไปทางหน้าหุ่น
+
+**ตั้งเครื่องนี้:** เพิ่มใน `.env` (ตัวอย่างอยู่ใน `.env.example`)
+```
+PHONE_CAMERA_URL=http://192.168.1.50:8080/shot.jpg
+PHONE_CAMERA_MODE=snapshot        # หรือ mjpeg กับ URL /video
+PHONE_CAMERA_RATE=5.0
+CAM_X=0.10                        # มือถือยื่นไปหน้าจากกลางหุ่น (m)
+CAM_Z=0.35                        # สูงจาก base_link (m) = ความสูงจากพื้น - 0.075
+CAM_PITCH=10                      # ก้มลงกี่องศา
+```
+แล้วรัน `docker compose up -d` (ถ้าไม่ตั้ง `PHONE_CAMERA_URL` กล้องจะปิด ส่วนอื่นทำงานเหมือนเดิม)
+
+**ตรวจ**
+```powershell
+docker logs mtrobo_camera                       # ต้องมี "phone camera connected"
+docker exec -it mtrobo bash
+ros2 topic hz /camera/image/compressed          # ประมาณ 5 Hz
+ros2 run tf2_ros tf2_echo base_link camera_link
+```
+ถ้า log ขึ้น `phone camera unreachable` ให้เปิด URL เดียวกันในเบราว์เซอร์ของเครื่องนี้ดูก่อน ถ้าเปิดไม่ได้แปลว่ามือถือกับเครื่องนี้อยู่คนละวง
+หรือแอปหยุดทำงาน พอมือถือกลับมา ภาพจะกลับมาเองโดยไม่ต้องรีสตาร์ท
+
 ## คำสั่งที่ใช้ประจำ
 
 | ต้องการ | คำสั่ง |
