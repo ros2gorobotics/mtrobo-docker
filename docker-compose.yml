@@ -41,3 +41,21 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+
+  # ส่งแผนที่ที่บันทึกไว้ให้หน้าเว็บ (ปุ่มรูปตาในเมนู "นำทางด้วยแผนที่"): /mtrobo/map/read -> /mtrobo/map/result
+  # อ่านโฟลเดอร์ maps อย่างเดียว ใช้เครือข่ายเดียวกับ container mtrobo
+  mapread:
+    image: ghcr.io/ros2gorobotics/mtrobo-docker:jazzy
+    container_name: mtrobo_mapread
+    network_mode: "service:mtrobo"
+    depends_on:
+      - mtrobo
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4     # ไม่ใช้ shared memory ข้าม container
+      MAPS_DIR: /home/ros/maps
+    volumes:
+      - ./maps:/home/ros/maps:ro
+      - ./mapread:/mapread:ro
+    command: ["python3", "/mapread/map_reader.py"]
+    restart: unless-stopped
