@@ -215,6 +215,21 @@ exit                       # ออกจาก container
 
 ---
 
+## คำสั่งที่ใช้ประจำ
+
+| ต้องการ | คำสั่ง |
+|---|---|
+| เริ่ม | `docker compose up -d` |
+| หยุด | `docker compose down` |
+| ดู log | `docker compose logs -f` |
+| ดู log เฉพาะ lidar | `docker compose logs --tail 200 \| Select-String "udp_lidar"` |
+| เข้า shell | `docker exec -it mtrobo bash` |
+| **อัปเดตเป็นเวอร์ชันล่าสุด** | `git pull` และ `cd ros2ready; git pull; cd ..` แล้วรัน `docker compose pull --ignore-buildable` ตามด้วย `docker compose up -d --build --force-recreate` |
+
+หลังติดตั้งครั้งแรกเสร็จ MTRobo จะเริ่มทำงานเองทุกครั้งที่เปิดเครื่อง หากไม่ต้องการให้เริ่มเอง ให้สั่ง `docker compose down`
+
+---
+
 ## สถานะเครื่องหุ่น (พอร์ต 9092)
 
 container `mtrobo` มีหน้าสถานะแบบอ่านอย่างเดียวที่ **http://localhost:9092/status** หน้าเว็บ MTRobo ใช้หน้านี้บอกว่าติดตรงไหน
@@ -230,21 +245,6 @@ container `mtrobo` มีหน้าสถานะแบบอ่านอย�
 
 ถ้าเปิดหน้านี้ไม่ได้ แปลว่า Docker Desktop หรือ container `mtrobo` ไม่ทำงาน ให้ดู `docker ps` และ `docker logs --tail 30 mtrobo`
 หน้านี้ไม่ใช้ `docker.sock` และสั่งงานใดๆ ไม่ได้
-
-## คำสั่งที่ใช้ประจำ
-
-| ต้องการ | คำสั่ง |
-|---|---|
-| เริ่ม | `docker compose up -d` |
-| หยุด | `docker compose down` |
-| ดู log | `docker compose logs -f` |
-| ดู log เฉพาะ lidar | `docker compose logs --tail 200 \| Select-String "udp_lidar"` |
-| เข้า shell | `docker exec -it mtrobo bash` |
-| **อัปเดตเป็นเวอร์ชันล่าสุด** | `git pull` และ `cd ros2ready; git pull; cd ..` แล้วรัน `docker compose pull --ignore-buildable` ตามด้วย `docker compose up -d --build --force-recreate` |
-
-หลังติดตั้งครั้งแรกเสร็จ MTRobo จะเริ่มทำงานเองทุกครั้งที่เปิดเครื่อง หากไม่ต้องการให้เริ่มเอง ให้สั่ง `docker compose down`
-
----
 
 ## แก้ปัญหา
 
