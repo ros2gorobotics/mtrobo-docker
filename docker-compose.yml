@@ -8,6 +8,7 @@ services:
       - "8888:8888/udp"   # micro-ROS agent (ESP32 -> PC)
       - "9999:9999/udp"   # UDP lidar
       - "9090:9090"       # rosbridge (หน้าเว็บ MTRobo)
+      - "9092:9092"       # สถานะเครื่องหุ่นให้หน้าเว็บ: GET /status (อ่านอย่างเดียว)
     ipc: host
 
     environment:
@@ -26,8 +27,12 @@ services:
 
     volumes:
       - ./maps:/home/ros/maps          # แผนที่ / slam / zones / route graph
+      - ./status:/opt/mtrobo-status:ro # endpoint สถานะ :9092/status (ไม่ใช้ docker.sock)
       - /mnt/wslg:/mnt/wslg
       - /mnt/wslg/.X11-unix:/tmp/.X11-unix
+
+    # bringup ตามเดิม + endpoint สถานะ (process แยก ยังตอบได้แม้ rosbridge ล่ม)
+    command: ["bash", "/opt/mtrobo-status/start.sh"]
 
     restart: unless-stopped
 
