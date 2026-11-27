@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   # กล้องมือถือบนหุ่น -> /camera/image/compressed (jpeg) + TF base_link -> camera_link
-  # ตั้ง PHONE_CAMERA_URL ใน .env (ว่าง = ปิดกล้อง ระบบอื่นทำงานเหมือนเดิม) ดูหัวข้อ "กล้องมือถือ" ใน README
+  # ตั้งที่อยู่กล้องได้จากหน้าเว็บ (หน้าต่างกล้อง -> กล้องมือถือ -> Apply) หรือ PHONE_CAMERA_URL ใน .env ดูหัวข้อ "กล้องมือถือ" ใน README
   # ใช้เครือข่ายเดียวกับ container mtrobo: ROS 2 เห็นกันเหมือนอยู่เครื่องเดียว และออกไปหามือถือใน LAN ได้
   camera:
     image: ghcr.io/ros2gorobotics/mtrobo-docker:jazzy
@@ -54,10 +54,12 @@ services:
       CAM_X: ${CAM_X:-0.10}
       CAM_Z: ${CAM_Z:-0.35}
       CAM_PITCH: ${CAM_PITCH:-10}
+      PHONE_CAMERA_SETTINGS: /home/ros/maps/phone_camera.json   # ค่าที่ตั้งจากหน้าเว็บ (ชนะ .env)
     volumes:
       - ./camera:/camera:ro
+      - ./maps:/home/ros/maps          # เขียน phone_camera.json เมื่อกด Apply ในหน้าเว็บ
     command: ["ros2", "launch", "/camera/phone_camera.launch.py"]
-    restart: on-failure     # ไม่ตั้ง URL: container จบเองแล้วไม่เริ่มใหม่
+    restart: unless-stopped  # ทำงานตลอด แม้ยังไม่ตั้ง URL (ตั้งได้จากหน้าเว็บ)
 
   # หน้าเว็บ ros2ready (มือถือเปิด http://<IP เครื่อง Windows>:3000)
   # ต้อง clone ไว้ข้างไฟล์นี้ก่อน: git clone https://github.com/jamorn1976/ros2ready.git
