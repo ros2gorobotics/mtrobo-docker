@@ -36,6 +36,29 @@ services:
 
     restart: unless-stopped
 
+  # กล้องมือถือบนหุ่น -> /camera/image/compressed (jpeg) + TF base_link -> camera_link
+  # ตั้ง PHONE_CAMERA_URL ใน .env (ว่าง = ปิดกล้อง ระบบอื่นทำงานเหมือนเดิม) ดูหัวข้อ "กล้องมือถือ" ใน README
+  # ใช้เครือข่ายเดียวกับ container mtrobo: ROS 2 เห็นกันเหมือนอยู่เครื่องเดียว และออกไปหามือถือใน LAN ได้
+  camera:
+    image: ghcr.io/ros2gorobotics/mtrobo-docker:jazzy
+    container_name: mtrobo_camera
+    network_mode: "service:mtrobo"
+    depends_on:
+      - mtrobo
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4     # ไม่ใช้ shared memory ข้าม container
+      PHONE_CAMERA_URL: ${PHONE_CAMERA_URL:-}
+      PHONE_CAMERA_MODE: ${PHONE_CAMERA_MODE:-snapshot}
+      PHONE_CAMERA_RATE: ${PHONE_CAMERA_RATE:-5.0}
+      CAM_X: ${CAM_X:-0.10}
+      CAM_Z: ${CAM_Z:-0.35}
+      CAM_PITCH: ${CAM_PITCH:-10}
+    volumes:
+      - ./camera:/camera:ro
+    command: ["ros2", "launch", "/camera/phone_camera.launch.py"]
+    restart: on-failure     # ไม่ตั้ง URL: container จบเองแล้วไม่เริ่มใหม่
+
   # หน้าเว็บ ros2ready (มือถือเปิด http://<IP เครื่อง Windows>:3000)
   # ต้อง clone ไว้ข้างไฟล์นี้ก่อน: git clone https://github.com/jamorn1976/ros2ready.git
   # อัปเดต: cd ros2ready && git pull && cd .. && docker compose up -d --build web
